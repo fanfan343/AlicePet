@@ -1,0 +1,32 @@
+{
+  "id": "alice",
+  "displayName": "AlicePhil VRM",
+  "modelNameHints": ["alice", "alicephil"],
+  "assetsFolderRelative": "独立道具与配方",
+  "outfitNodeNames": ["Clothes", "Pantyhose", "Shoes", "HairShadow"],
+  "outfitMorphNames": [
+    "Body2 ShapeKey-Dress",
+    "Body2 ShapeKey-Shoes",
+    "Body2 ShapeKey-Pantyhose",
+    "Pantyhose ShapeKey-Shoes",
+    "Pantyhose ShapeKey-Dress",
+    "ClothesPart-HairBandOff",
+    "ClothesPart-ChestRibbonOff",
+    "HairPart-SideOff"
+  ],
+  "hairStyles": {
+    "HairStyleA": [],
+    "HairStyleB": [
+      { "nodeName": "Hair_Side_01.L.001", "axis": [0, 0, 1], "angleRad": 0.28 },
+      { "nodeName": "Hair_Side_01.R.001", "axis": [0, 0, 1], "angleRad": -0.28 },
+      { "nodeName": "HairBack_Root", "axis": [1, 0, 0], "angleRad": 0.22 }
+    ],
+    "HairStyleB2": [
+      { "nodeName": "HairBack_Root", "axis": [1, 0, 0], "angleRad": -0.18 },
+      { "nodeName": "Hair_Back_02.L.001", "axis": [0, 0, 1], "angleRad": 0.32 },
+      { "nodeName": "Hair_Back_02.R.001", "axis": [0, 0, 1], "angleRad": -0.32 }
+    ]
+  },
+  "bookPropOffset": [0.0, 0.90, 0.31],
+  "bookTiltRad": 0.46
+}

@@ -148,17 +148,23 @@ final class AssetRecipeStore {
     static let outfitMorphInternalPrefix = "__alice_outfit_"
     static let expressionRecipePrefix = "__alice_expr_"
 
-    func locateAssetsFolder(near modelURL: URL?) -> URL? {
+    func locateAssetsFolder(near modelURL: URL?, relativeName: String?) -> URL? {
+        guard let relativeName, !relativeName.isEmpty else {
+            self.assetsFolderURL = nil
+            return nil
+        }
         let fm = FileManager.default
         var candidates: [URL] = []
         if let modelURL {
             let dir = modelURL.deletingLastPathComponent()
-            candidates.append(dir.appendingPathComponent("独立道具与配方"))
-            candidates.append(dir.deletingLastPathComponent().appendingPathComponent("降采样模型/独立道具与配方"))
+            candidates.append(dir.appendingPathComponent(relativeName))
+            candidates.append(dir.deletingLastPathComponent().appendingPathComponent("降采样模型/\(relativeName)"))
         }
         let bundleParent = Bundle.main.bundleURL.deletingLastPathComponent()
-        candidates.append(bundleParent.appendingPathComponent("降采样模型/独立道具与配方"))
-        candidates.append(URL(fileURLWithPath: "/Users/funnyliu/Downloads/VRM项目/降采样模型/独立道具与配方"))
+        candidates.append(bundleParent.appendingPathComponent("降采样模型/\(relativeName)"))
+        let cwd = URL(fileURLWithPath: fm.currentDirectoryPath)
+        candidates.append(cwd.appendingPathComponent("降采样模型/\(relativeName)"))
+        candidates.append(cwd.deletingLastPathComponent().appendingPathComponent("降采样模型/\(relativeName)"))
 
         for url in candidates {
             if fm.fileExists(atPath: url.appendingPathComponent("recipes.json").path) {
@@ -166,12 +172,16 @@ final class AssetRecipeStore {
                 return url
             }
         }
+        self.assetsFolderURL = nil
         return nil
     }
 
-    func loadRecipes(near modelURL: URL?) {
-        guard let folder = locateAssetsFolder(near: modelURL) else {
-            AppLogger.shared.warn("Assets", "Could not locate 独立道具与配方 folder")
+    func loadRecipes(near modelURL: URL?, profile: ModelProfile) {
+        self.recipes = nil
+        guard let folder = locateAssetsFolder(near: modelURL, relativeName: profile.assetsFolderRelative) else {
+            if profile.assetsFolderRelative != nil {
+                AppLogger.shared.warn("Assets", "Could not locate \(profile.assetsFolderRelative ?? "") folder")
+            }
             return
         }
         let jsonURL = folder.appendingPathComponent("recipes.json")
@@ -188,7 +198,7 @@ final class AssetRecipeStore {
 
     /// Scans all meshes' morph target names (`targetNames`) and registers dynamic VRMExpressions
     /// for outfit morphs and Unity expression recipes so they work on both LightShapekey & Full VRM.
-    func registerExpressions(on model: VRMModel, controller: VRMExpressionController?) {
+    func registerExpressions(on model: VRMModel, controller: VRMExpressionController?, profile: ModelProfile) {
         availableFaceRecipes.removeAll()
         availableOutfitMorphKeys.removeAll()
         guard let controller else { return }
@@ -224,18 +234,8 @@ final class AssetRecipeStore {
             }
         }
 
-        // Register outfit morphs
-        let outfitMorphNames = [
-            "Body2 ShapeKey-Dress",
-            "Body2 ShapeKey-Shoes",
-            "Body2 ShapeKey-Pantyhose",
-            "Pantyhose ShapeKey-Shoes",
-            "Pantyhose ShapeKey-Dress",
-            "ClothesPart-HairBandOff",
-            "ClothesPart-ChestRibbonOff",
-            "HairPart-SideOff",
-        ]
-        for name in outfitMorphNames {
+        // Register profile-declared outfit morphs only when present on this VRM
+        for name in profile.outfitMorphNames {
             if let hit = morphLookup[name] {
                 var expr = VRMExpression(name: Self.outfitMorphInternalPrefix + name)
                 expr.morphTargetBinds = [VRMMorphTargetBind(node: hit.nodeIdx, index: hit.targetIdx, weight: 1.0, meshIndex: hit.meshIdx)]

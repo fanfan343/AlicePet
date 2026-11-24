@@ -10,7 +10,20 @@ func parseArg(_ flag: String) -> String? {
     return args[idx + 1]
 }
 
-let modelURL = URL(fileURLWithPath: parseArg("--model") ?? defaultModelPath)
+func resolveInitialModelURL(isHeadlessSnapshot: Bool) -> URL {
+    if let explicit = parseArg("--model") {
+        return URL(fileURLWithPath: explicit)
+    }
+    if !isHeadlessSnapshot,
+       let saved = UserDefaults.standard.string(forKey: AppDelegate.lastModelPathKey),
+       FileManager.default.fileExists(atPath: saved) {
+        return URL(fileURLWithPath: saved)
+    }
+    return URL(fileURLWithPath: defaultModelPath)
+}
+
+let isSnapshotMode = (parseArg("--snapshot") != nil)
+let modelURL = resolveInitialModelURL(isHeadlessSnapshot: isSnapshotMode)
 
 if let snapshotPath = parseArg("--snapshot") {
     var done = false
@@ -53,11 +66,7 @@ if let snapshotPath = parseArg("--snapshot") {
             }
 
             if let expr = parseArg("--expression") {
-                if let entry = controller.recipeStore.availableFaceRecipes.first(where: { $0.id.contains(expr) || $0.title.contains(expr) }) {
-                    controller.setCustomExpression(entry.id, weight: 1.0)
-                } else {
-                    controller.setCustomExpression(expr, weight: 1.0)
-                }
+                controller.applyExpression(named: expr, weight: 1.0)
             } else if CommandLine.arguments.contains("--test-arkit") {
                 if let exprCtrl = controller.renderer.expressionController {
                     let shapes = ARKitFaceBlendShapes(

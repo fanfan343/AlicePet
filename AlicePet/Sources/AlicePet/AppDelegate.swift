@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isClickThrough: Bool = false
     private var isAlwaysOnTop: Bool = true
     private let autoConnectIPhoneKey = "autoConnectIPhoneCamera"
+    nonisolated static let lastModelPathKey = "lastOpenedVRMModelPath"
 
     private var autoConnectIPhoneCamera: Bool {
         get {
@@ -265,33 +266,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         handRoot.submenu = handMenu
         menu.addItem(handRoot)
 
-        // 4. Outfit & Hair Submenu
-        let outfitMenu = NSMenu()
-        let outfitToggles: [(String, Selector, Bool)] = [
-            ("连衣裙 (Dress)", #selector(toggleOutfitDress), controller.outfitState.showDress),
-            ("丝袜 (Pantyhose)", #selector(toggleOutfitPantyhose), controller.outfitState.showPantyhose),
-            ("鞋子 (Shoes)", #selector(toggleOutfitShoes), controller.outfitState.showShoes),
-            ("发箍 (HairBand)", #selector(toggleOutfitHairBand), controller.outfitState.showHairBand),
-            ("胸前蝴蝶结 (ChestRibbon)", #selector(toggleOutfitChestRibbon), controller.outfitState.showChestRibbon),
-            ("侧发 (HairSide)", #selector(toggleOutfitHairSide), controller.outfitState.showHairSide),
-        ]
-        for (title, sel, active) in outfitToggles {
-            let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
-            item.target = self
-            item.state = active ? .on : .off
-            outfitMenu.addItem(item)
+        // 4. Outfit & Hair Submenu (adapts dynamically to the loaded VRM profile & morphs)
+        if controller.hasAnyOutfitControls || controller.hasHairStyleControls {
+            let outfitMenu = NSMenu()
+            let outfitToggles: [(String, OutfitToggleKind, Selector, Bool)] = [
+                ("连衣裙 (Dress)", .dress, #selector(toggleOutfitDress), controller.outfitState.showDress),
+                ("丝袜 (Pantyhose)", .pantyhose, #selector(toggleOutfitPantyhose), controller.outfitState.showPantyhose),
+                ("鞋子 (Shoes)", .shoes, #selector(toggleOutfitShoes), controller.outfitState.showShoes),
+                ("发箍 (HairBand)", .hairBand, #selector(toggleOutfitHairBand), controller.outfitState.showHairBand),
+                ("胸前蝴蝶结 (ChestRibbon)", .chestRibbon, #selector(toggleOutfitChestRibbon), controller.outfitState.showChestRibbon),
+                ("侧发 (HairSide)", .hairSide, #selector(toggleOutfitHairSide), controller.outfitState.showHairSide),
+            ]
+            for (title, kind, sel, active) in outfitToggles {
+                let supported = controller.isOutfitToggleSupported(kind)
+                let item = NSMenuItem(
+                    title: supported ? title : "\(title) · 当前模型不含",
+                    action: supported ? sel : nil,
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.isEnabled = supported
+                item.state = (supported && active) ? .on : .off
+                outfitMenu.addItem(item)
+            }
+            if controller.hasHairStyleControls {
+                outfitMenu.addItem(.separator())
+                for style in HairStyleOption.allCases {
+                    let item = NSMenuItem(title: style.displayTitle, action: #selector(selectHairStyle(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = style.rawValue
+                    item.state = (controller.outfitState.hairStyle == style) ? .on : .off
+                    outfitMenu.addItem(item)
+                }
+            }
+            let outfitRoot = NSMenuItem(title: "换装与发型", action: nil, keyEquivalent: "")
+            outfitRoot.submenu = outfitMenu
+            menu.addItem(outfitRoot)
         }
-        outfitMenu.addItem(.separator())
-        for style in HairStyleOption.allCases {
-            let item = NSMenuItem(title: style.displayTitle, action: #selector(selectHairStyle(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = style.rawValue
-            item.state = (controller.outfitState.hairStyle == style) ? .on : .off
-            outfitMenu.addItem(item)
-        }
-        let outfitRoot = NSMenuItem(title: "换装与发型", action: nil, keyEquivalent: "")
-        outfitRoot.submenu = outfitMenu
-        menu.addItem(outfitRoot)
 
         // 5. Expression Presets Submenu
         let exprMenu = NSMenu()
@@ -306,6 +317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let item = NSMenuItem(title: label, action: #selector(selectPresetMood(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = preset?.rawValue ?? "__neutral__"
+            let isSelected = (controller.activeCustomExpression == nil) && (controller.activePresetMood == preset)
+            item.state = isSelected ? .on : .off
             exprMenu.addItem(item)
         }
         if !controller.recipeStore.availableFaceRecipes.isEmpty {
@@ -314,6 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let item = NSMenuItem(title: entry.title, action: #selector(selectCustomExpression(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = entry.id
+                item.state = (controller.activeCustomExpression == entry.id) ? .on : .off
                 exprMenu.addItem(item)
             }
         }
@@ -495,11 +509,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if let preset = VRMExpressionPreset(rawValue: raw) {
             controller.setPresetMood(preset)
         }
+        refreshMenus()
     }
 
     @objc private func selectCustomExpression(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         controller.setCustomExpression(name, weight: 1.0)
+        refreshMenus()
     }
 
     @objc private func toggleClickThrough() {
@@ -540,6 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseDirectories = false
         panel.directoryURL = initialModelURL.deletingLastPathComponent()
         if panel.runModal() == .OK, let url = panel.url {
+            UserDefaults.standard.set(url.path, forKey: Self.lastModelPathKey)
             Task { @MainActor in
                 try? await controller.loadModel(from: url)
                 refreshMenus()

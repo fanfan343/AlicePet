@@ -10,11 +10,11 @@
 - [x] 建立项目 `AGENTS.md`、规范预留目录、一键视觉回归脚本与 `release` 构建
 - [x] 轻量级性能采样日志（FPS / 帧耗时 / 内存基线）
 
-## Stage 2：架构拆薄与渲染打磨（下一阶段）
-- [ ] 将 `PetController.swift` 拆分为独立模块：渲染管线、骨骼姿态混合器、表情分层混合器、模型配方适配层
-- [ ] 把 Alice 专属节点/换装规则外置到 `profiles/`，主程序只依赖通用 VRM 标准
-- [ ] 检查并补齐半透明道具渲染、菜单表情勾选态、记住上次加载的模型路径
-- [ ] 打磨 MToon 赛璐璐光影、透明窗边缘抗锯齿（去黑边/溢色）、SpringBone 切姿态稳定性
+## Stage 2：架构拆薄与渲染打磨（进行中）
+- [x] 将 `PetController.swift` 拆分为独立模块：骨骼姿态（`PoseController` + `MotionSource` 协议）、表情分层（`ExpressionMixer`）、模型适配（`ModelProfile`）
+- [x] 把 Alice 专属节点/换装/发型/道具偏移外置到 `profiles/alice.json`，主程序支持通用 VRM 降级
+- [x] 修复切姿态 SpringBone 炸毛/发箍飞起（`resetPhysics` + `warmupPhysics`）、表情菜单勾选态、换装菜单动态检测、记住上次加载的模型路径
+- [ ] 打磨 MToon 赛璐璐光影、透明窗边缘抗锯齿（去黑边/溢色）、进一步优化坐姿/AFK 裙摆碰撞
 - [ ] 动态帧率省电策略（互动 60fps / 静止待机 24–30fps / 被遮挡降频或休眠）
 - [ ] 接入 1–2 个非 Alice 的通用 VRM 模型验证跨模型兼容性
 
