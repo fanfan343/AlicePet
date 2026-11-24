@@ -92,7 +92,8 @@ final class PropSceneRenderer {
         viewProjection: simd_float4x4,
         cameraPosition: SIMD3<Float>,
         bookWorldMatrix: simd_float4x4,
-        time: Float
+        time: Float,
+        lightingPreset: LightingPreset = .animeSoftDay
     ) {
         guard hasActiveProps else { return }
 
@@ -137,11 +138,13 @@ final class PropSceneRenderer {
         rpd.depthAttachment.storeAction = .dontCare
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
+        let propLights = LightingConfigurator.propLights(for: lightingPreset)
         let scene = GLTFSceneState(
             viewProjection: viewProjection,
             cameraPosition: cameraPosition,
-            lightDirection: normalize(SIMD3<Float>(0.35, -0.85, -0.45)),
-            lightColor: SIMD3<Float>(2.4, 2.35, 2.25)
+            lightDirection: normalize(SIMD3<Float>(-0.25, -0.55, -0.80)),
+            lightColor: SIMD3<Float>(2.2, 2.15, 2.10),
+            lights: propLights
         )
         let pso = (colorTexture.sampleCount > 1) ? pipelineStatesMSAA : pipelineStatesSingle
         gltfRenderer.encodeOpaqueDrawCalls(

@@ -124,13 +124,13 @@ final class PoseController: MotionSource {
             rotateBone(.neck, on: model, restTransforms: restTransforms, yaw: 4, pitch: 12)
             rotateBone(.head, on: model, restTransforms: restTransforms, yaw: 0, pitch: 8)
 
-            // Gentle floating legs tuned to stay clear of skirt mesh
-            rotateBone(.leftUpperLeg, on: model, restTransforms: restTransforms, yaw: 4, pitch: -24, roll: -4)
-            rotateBone(.leftLowerLeg, on: model, restTransforms: restTransforms, pitch: 38)
-            rotateBone(.leftFoot, on: model, restTransforms: restTransforms, pitch: 20)
-            rotateBone(.rightUpperLeg, on: model, restTransforms: restTransforms, yaw: -4, pitch: -34, roll: 4)
-            rotateBone(.rightLowerLeg, on: model, restTransforms: restTransforms, pitch: 52)
-            rotateBone(.rightFoot, on: model, restTransforms: restTransforms, pitch: 24)
+            // Gentle floating legs tuned to stay completely clear of skirt mesh
+            rotateBone(.leftUpperLeg, on: model, restTransforms: restTransforms, yaw: 3, pitch: -15, roll: -3)
+            rotateBone(.leftLowerLeg, on: model, restTransforms: restTransforms, pitch: 34)
+            rotateBone(.leftFoot, on: model, restTransforms: restTransforms, pitch: 18)
+            rotateBone(.rightUpperLeg, on: model, restTransforms: restTransforms, yaw: -3, pitch: -21, roll: 3)
+            rotateBone(.rightLowerLeg, on: model, restTransforms: restTransforms, pitch: 44)
+            rotateBone(.rightFoot, on: model, restTransforms: restTransforms, pitch: 22)
 
             // Arms brought forward toward open book
             rotateBone(.leftUpperArm, on: model, restTransforms: restTransforms, yaw: -36, pitch: -22, roll: -52)
@@ -149,11 +149,11 @@ final class PoseController: MotionSource {
             rotateBone(.neck, on: model, restTransforms: restTransforms, yaw: -4, pitch: 4)
 
             // Gentle floating legs tuned to avoid skirt clipping
-            rotateBone(.leftUpperLeg, on: model, restTransforms: restTransforms, yaw: 4, pitch: -34, roll: -4)
-            rotateBone(.leftLowerLeg, on: model, restTransforms: restTransforms, pitch: 48)
-            rotateBone(.leftFoot, on: model, restTransforms: restTransforms, pitch: 20)
-            rotateBone(.rightUpperLeg, on: model, restTransforms: restTransforms, yaw: -4, pitch: -20, roll: 4)
-            rotateBone(.rightLowerLeg, on: model, restTransforms: restTransforms, pitch: 30)
+            rotateBone(.leftUpperLeg, on: model, restTransforms: restTransforms, yaw: 3, pitch: -19, roll: -3)
+            rotateBone(.leftLowerLeg, on: model, restTransforms: restTransforms, pitch: 40)
+            rotateBone(.leftFoot, on: model, restTransforms: restTransforms, pitch: 18)
+            rotateBone(.rightUpperLeg, on: model, restTransforms: restTransforms, yaw: -3, pitch: -13, roll: 3)
+            rotateBone(.rightLowerLeg, on: model, restTransforms: restTransforms, pitch: 26)
             rotateBone(.rightFoot, on: model, restTransforms: restTransforms, pitch: 16)
 
             rotateBone(.leftUpperArm, on: model, restTransforms: restTransforms, yaw: -24, pitch: -16, roll: -50)

@@ -14,7 +14,7 @@
 - [x] 将 `PetController.swift` 拆分为独立模块：骨骼姿态（`PoseController` + `MotionSource` 协议）、表情分层（`ExpressionMixer`）、模型适配（`ModelProfile`）
 - [x] 把 Alice 专属节点/换装/发型/道具偏移外置到 `profiles/alice.json`，主程序支持通用 VRM 降级
 - [x] 修复切姿态 SpringBone 炸毛/发箍飞起（`resetPhysics` + `warmupPhysics`）、表情菜单勾选态、换装菜单动态检测、记住上次加载的模型路径
-- [ ] 打磨 MToon 赛璐璐光影、透明窗边缘抗锯齿（去黑边/溢色）、进一步优化坐姿/AFK 裙摆碰撞
+- [x] 打磨 MToon 赛璐璐光影（4 套预设 + 描边可选 + 恢复作者原色/自发光）、道具多灯均衡补光、消除 AFK 裙摆穿模
 - [ ] 动态帧率省电策略（互动 60fps / 静止待机 24–30fps / 被遮挡降频或休眠）
 - [ ] 接入 1–2 个非 Alice 的通用 VRM 模型验证跨模型兼容性
 

@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isClickThrough: Bool = false
     private var isAlwaysOnTop: Bool = true
     private let autoConnectIPhoneKey = "autoConnectIPhoneCamera"
+    private let lightingPresetKey = "mtoonLightingPreset"
+    private let outlineStyleKey = "mtoonOutlineStyle"
     nonisolated static let lastModelPathKey = "lastOpenedVRMModelPath"
 
     private var autoConnectIPhoneCamera: Bool {
@@ -40,6 +42,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             controller = try PetController(sampleCount: 4)
+            if let savedLight = UserDefaults.standard.string(forKey: lightingPresetKey),
+               let preset = LightingPreset(rawValue: savedLight) {
+                controller.setLightingPreset(preset)
+            }
+            if let savedOutline = UserDefaults.standard.string(forKey: outlineStyleKey),
+               let style = OutlineStyle(rawValue: savedOutline) {
+                controller.setOutlineStyle(style)
+            }
         } catch {
             AppLogger.shared.error("App", "Failed to initialize Metal/VRMMetalKit: \(error)")
             NSApp.terminate(nil)
@@ -335,6 +345,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exprRoot.submenu = exprMenu
         menu.addItem(exprRoot)
 
+        // 5b. MToon Lighting & Outline Submenu
+        let lookDevMenu = NSMenu()
+        for preset in LightingPreset.allCases {
+            let item = NSMenuItem(title: preset.displayTitle, action: #selector(selectLightingPreset(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset.rawValue
+            item.state = (controller.lightingPreset == preset) ? .on : .off
+            lookDevMenu.addItem(item)
+        }
+        lookDevMenu.addItem(.separator())
+        for style in OutlineStyle.allCases {
+            let item = NSMenuItem(title: style.displayTitle, action: #selector(selectOutlineStyle(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = style.rawValue
+            item.state = (controller.outlineStyle == style) ? .on : .off
+            lookDevMenu.addItem(item)
+        }
+        let lookDevRoot = NSMenuItem(title: "光影与描边 (MToon)", action: nil, keyEquivalent: "")
+        lookDevRoot.submenu = lookDevMenu
+        menu.addItem(lookDevRoot)
+
         menu.addItem(.separator())
 
         // 6. Window & Renderer toggles
@@ -499,6 +530,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let style = HairStyleOption(rawValue: raw) else { return }
         controller.outfitState.hairStyle = style
         controller.applyOutfitState()
+        refreshMenus()
+    }
+
+    @objc private func selectLightingPreset(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let preset = LightingPreset(rawValue: raw) else { return }
+        UserDefaults.standard.set(preset.rawValue, forKey: lightingPresetKey)
+        controller.setLightingPreset(preset)
+        refreshMenus()
+    }
+
+    @objc private func selectOutlineStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let style = OutlineStyle(rawValue: raw) else { return }
+        UserDefaults.standard.set(style.rawValue, forKey: outlineStyleKey)
+        controller.setOutlineStyle(style)
         refreshMenus()
     }
 

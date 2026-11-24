@@ -65,6 +65,8 @@ final class PetController: NSObject, MTKViewDelegate {
     var manualPropOverride: PropSceneRenderer.ActivePropMode? {
         didSet { syncPropRendererMode() }
     }
+    private(set) var lightingPreset: LightingPreset = .animeSoftDay
+    private(set) var outlineStyle: OutlineStyle = .off
 
     private(set) var activeCameraID: String?
     var cameraTrackingActive: Bool { activeCameraID != nil }
@@ -97,10 +99,7 @@ final class PetController: NSObject, MTKViewDelegate {
 
         super.init()
 
-        renderer.setup3PointLighting(keyIntensity: 1.0, fillIntensity: 0.65, rimIntensity: 0.35)
-        renderer.setAmbientColor(SIMD3<Float>(0.22, 0.21, 0.23))
-        renderer.setLightNormalizationMode(.radiometric)
-        renderer.outlineScale = 0.0
+        applyLightingAndOutline()
         renderer.enableSpringBone = springBoneEnabled
 
         cameraTracker.onFrame = { [weak self] frame in
@@ -144,6 +143,7 @@ final class PetController: NSObject, MTKViewDelegate {
         camera.fit(minBounds: minBounds, maxBounds: maxBounds)
 
         renderer.loadModel(loaded)
+        applyLightingAndOutline()
         expressionMixer.initializeForModel(loaded, renderer: renderer)
         recipeStore.loadRecipes(near: url, profile: profile)
         recipeStore.registerExpressions(on: loaded, controller: renderer.expressionController, profile: profile)
@@ -169,6 +169,22 @@ final class PetController: NSObject, MTKViewDelegate {
     }
 
     // MARK: - Pose, Props, Hand Gestures & Outfits
+
+    func setLightingPreset(_ preset: LightingPreset) {
+        lightingPreset = preset
+        applyLightingAndOutline()
+        AppLogger.shared.info("LookDev", "Switched lightingPreset=\(preset.rawValue)")
+    }
+
+    func setOutlineStyle(_ style: OutlineStyle) {
+        outlineStyle = style
+        applyLightingAndOutline()
+        AppLogger.shared.info("LookDev", "Switched outlineStyle=\(style.rawValue)")
+    }
+
+    private func applyLightingAndOutline() {
+        LightingConfigurator.apply(preset: lightingPreset, outline: outlineStyle, to: renderer)
+    }
 
     func setPoseMode(_ mode: PetPoseMode) {
         poseController.setPoseMode(mode)
@@ -381,7 +397,8 @@ final class PetController: NSObject, MTKViewDelegate {
                 viewProjection: renderer.projectionMatrix * renderer.viewMatrix,
                 cameraPosition: camera.eyePosition,
                 bookWorldMatrix: poseController.computeBookWorldMatrix(time: elapsed, profile: activeProfile),
-                time: elapsed
+                time: elapsed,
+                lightingPreset: lightingPreset
             )
         }
 
@@ -487,7 +504,8 @@ final class PetController: NSObject, MTKViewDelegate {
                 viewProjection: renderer.projectionMatrix * renderer.viewMatrix,
                 cameraPosition: camera.eyePosition,
                 bookWorldMatrix: poseController.computeBookWorldMatrix(time: animTime, profile: activeProfile),
-                time: animTime
+                time: animTime,
+                lightingPreset: lightingPreset
             )
         }
 

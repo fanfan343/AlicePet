@@ -33,6 +33,12 @@ if let snapshotPath = parseArg("--snapshot") {
             let controller = try PetController(sampleCount: 1)
             try await controller.loadModel(from: modelURL, synchronousPhysics: true)
 
+            if let lightRaw = parseArg("--lighting"), let preset = LightingPreset(rawValue: lightRaw) {
+                controller.setLightingPreset(preset)
+            }
+            if let outlineRaw = parseArg("--outline"), let style = OutlineStyle(rawValue: outlineRaw) {
+                controller.setOutlineStyle(style)
+            }
             if let poseRaw = parseArg("--pose"), let pose = PetPoseMode(rawValue: poseRaw) {
                 controller.setPoseMode(pose)
             }
