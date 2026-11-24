@@ -21,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var autoConnectIPhoneCamera: Bool {
         get {
             if UserDefaults.standard.object(forKey: autoConnectIPhoneKey) == nil {
-                return true
+                return false
             }
             return UserDefaults.standard.bool(forKey: autoConnectIPhoneKey)
         }
@@ -215,6 +215,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let refreshCamItem = NSMenuItem(title: "刷新摄像头列表", action: #selector(refreshCameraList), keyEquivalent: "")
         refreshCamItem.target = self
         camMenu.addItem(refreshCamItem)
+
+        camMenu.addItem(.separator())
+        let iphoneHint = NSMenuItem(title: "提示：连续互通仅支持 iPhone 后置，前置需后续 VMC 协议", action: nil, keyEquivalent: "")
+        iphoneHint.isEnabled = false
+        camMenu.addItem(iphoneHint)
 
         let camRoot = NSMenuItem(title: controller.cameraTrackingActive ? "摄像头捕捉 (运行中)" : "摄像头捕捉 (Mac / iPhone)", action: nil, keyEquivalent: "")
         camRoot.submenu = camMenu
@@ -657,7 +662,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        controller?.cameraTracker.stopSync()
+    }
+
     @objc private func quitApp() {
+        controller.stopCameraCapture()
         NSApp.terminate(nil)
     }
 }

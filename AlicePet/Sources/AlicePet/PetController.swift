@@ -379,14 +379,20 @@ final class PetController: NSObject, MTKViewDelegate {
 
         let elapsed = Float(frameStart - startTime)
         if let model {
+            let trackingBody = cameraTrackingActive && cameraTracker.upperBodyTrackingEnabled && bodySolver.hasActiveBody
+            // Always start from the clean base pose before layering 3D upper-body tracking so SLERP never feeds back
+            if trackingBody {
+                poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
+                poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
+            }
             poseController.applyProceduralFrame(
                 to: model,
                 restTransforms: poseController.restNodeTransforms,
                 elapsed: elapsed,
-                idleBreathingEnabled: idleBreathingEnabled && !(cameraTrackingActive && cameraTracker.upperBodyTrackingEnabled && bodySolver.hasActiveBody),
+                idleBreathingEnabled: idleBreathingEnabled && !trackingBody,
                 cameraHeadAngles: cameraTrackingActive ? expressionMixer.smoothedHeadAngles : nil
             )
-            if cameraTrackingActive && cameraTracker.upperBodyTrackingEnabled {
+            if trackingBody {
                 bodySolver.apply(to: model, restTransforms: poseController.restNodeTransforms, now: frameStart)
             }
             expressionMixer.updateLookAt(

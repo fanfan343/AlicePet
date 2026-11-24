@@ -16,11 +16,11 @@ final class ExpressionMixer {
     var eyeTrackingEnabled: Bool = true
 
     private var blinkTimer: Timer?
-    private var yawFilter = OneEuroFilterScalar(minCutoff: 1.5, beta: 0.14, dCutoff: 1.0)
-    private var pitchFilter = OneEuroFilterScalar(minCutoff: 1.5, beta: 0.14, dCutoff: 1.0)
-    private var rollFilter = OneEuroFilterScalar(minCutoff: 1.5, beta: 0.14, dCutoff: 1.0)
-    private var gazeXFilter = OneEuroFilterScalar(minCutoff: 2.2, beta: 0.10, dCutoff: 1.0)
-    private var gazeYFilter = OneEuroFilterScalar(minCutoff: 2.2, beta: 0.10, dCutoff: 1.0)
+    private var yawFilter = OneEuroFilterScalar(minCutoff: 0.55, beta: 0.04, dCutoff: 1.0)
+    private var pitchFilter = OneEuroFilterScalar(minCutoff: 0.55, beta: 0.04, dCutoff: 1.0)
+    private var rollFilter = OneEuroFilterScalar(minCutoff: 0.55, beta: 0.04, dCutoff: 1.0)
+    private var gazeXFilter = OneEuroFilterScalar(minCutoff: 1.1, beta: 0.06, dCutoff: 1.0)
+    private var gazeYFilter = OneEuroFilterScalar(minCutoff: 1.1, beta: 0.06, dCutoff: 1.0)
 
     private(set) var smoothedHeadAngles: SIMD3<Float> = .zero
     private(set) var latestCameraGaze: SIMD2<Float> = .zero
@@ -140,10 +140,13 @@ final class ExpressionMixer {
         guard let exprCtrl = renderer.expressionController else { return }
         faceDriver.update(blendShapes: frame.blendShapes, controller: exprCtrl, maxAge: 0.5)
         let now = CACurrentMediaTime()
+        let rawY = yawFilter.filter(frame.headYaw, timestamp: now)
+        let rawP = pitchFilter.filter(frame.headPitch, timestamp: now)
+        let rawR = rollFilter.filter(frame.headRoll, timestamp: now)
         smoothedHeadAngles = SIMD3<Float>(
-            yawFilter.filter(frame.headYaw, timestamp: now),
-            pitchFilter.filter(frame.headPitch, timestamp: now),
-            rollFilter.filter(frame.headRoll, timestamp: now)
+            abs(rawY) < 0.012 ? 0 : rawY,
+            abs(rawP) < 0.012 ? 0 : rawP,
+            abs(rawR) < 0.012 ? 0 : rawR
         )
         latestCameraGaze = SIMD2<Float>(
             gazeXFilter.filter(frame.gazeOffset.x, timestamp: now),

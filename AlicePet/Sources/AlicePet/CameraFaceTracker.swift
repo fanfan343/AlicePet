@@ -15,9 +15,9 @@ struct CameraDeviceInfo: Identifiable, Sendable {
 
     var displayTitle: String {
         if isContinuityCamera {
-            return "📱 \(name)（连续互通相机）"
+            return "📱 \(name)（连续互通·系统仅支持后置镜头）"
         } else if isBuiltIn {
-            return "💻 \(name)"
+            return "💻 \(name)（前置镜头）"
         } else {
             return "📷 \(name)"
         }
@@ -37,16 +37,35 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     private let captureQueue = DispatchQueue(label: "com.funnyliu.AlicePet.cameraCapture", qos: .userInteractive)
     private let videoOutput = AVCaptureVideoDataOutput()
 
+    // Atomic generation lock prevents stale async start() calls from reopening the camera after stop()
+    private let stateLock = NSLock()
+    private var sessionGeneration: Int = 0
+    private var isStoppedOrStopping: Bool = true
+
     private var currentDeviceID: String?
     private var isProcessingFrame = false
+    private var lastProcessedTimestamp: TimeInterval = 0
+    private let minInferenceInterval: TimeInterval = 1.0 / 20.0 // 20Hz Vision inference -> smooth & low power
+
     private var baselineEyebrowRatio: Float?
     private var baselineMouthWidthRatio: Float?
-    private var baselineTorsoPitch: Float?
-    private var baselineTorsoRoll: Float?
+    private var baselineShoulderWidth: Float?
+    private var baselineShoulderCenterX: Float?
+    private var baselineShoulderTilt: Float?
     private var baselineHeadPitch: Float?
     private var preferredOrientation: CGImagePropertyOrientation = .up
     private var frameCounter: Int = 0
     private var consecutiveNoFaceFrames: Int = 0
+
+    // Per-channel 1€ smoothing on raw Vision measurements to eliminate high-frequency twitching
+    private var earLeftFilter = OneEuroFilterScalar(minCutoff: 1.6, beta: 0.12, dCutoff: 1.0)
+    private var earRightFilter = OneEuroFilterScalar(minCutoff: 1.6, beta: 0.12, dCutoff: 1.0)
+    private var jawFilter = OneEuroFilterScalar(minCutoff: 1.1, beta: 0.08, dCutoff: 1.0)
+    private var smileLeftFilter = OneEuroFilterScalar(minCutoff: 0.9, beta: 0.05, dCutoff: 1.0)
+    private var smileRightFilter = OneEuroFilterScalar(minCutoff: 0.9, beta: 0.05, dCutoff: 1.0)
+    private var puckerFilter = OneEuroFilterScalar(minCutoff: 0.9, beta: 0.05, dCutoff: 1.0)
+    private var browLeftFilter = OneEuroFilterScalar(minCutoff: 0.6, beta: 0.03, dCutoff: 1.0)
+    private var browRightFilter = OneEuroFilterScalar(minCutoff: 0.6, beta: 0.03, dCutoff: 1.0)
 
     var mirrorMode: Bool = true
     var upperBodyTrackingEnabled: Bool = true
@@ -81,7 +100,21 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
 
     deinit {
         NotificationCenter.default.removeObserver(self)
-        session.stopRunning()
+        teardownSessionNow()
+    }
+
+    private func nextGeneration(active: Bool) -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        sessionGeneration += 1
+        isStoppedOrStopping = !active
+        return sessionGeneration
+    }
+
+    private func isGenerationValid(_ gen: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return gen == sessionGeneration && !isStoppedOrStopping
     }
 
     @objc private func handleDeviceNotification(_ notification: Notification) {
@@ -120,20 +153,16 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
     }
 
-    /// Resets neutral baselines so the user's current relaxed face & seated posture becomes zero.
     func calibrateNeutral() {
         captureQueue.async { [weak self] in
             guard let self else { return }
-            self.baselineEyebrowRatio = nil
-            self.baselineMouthWidthRatio = nil
-            self.baselineTorsoPitch = nil
-            self.baselineTorsoRoll = nil
-            self.baselineHeadPitch = nil
+            self.resetBaselinesAndFilters()
             AppLogger.shared.info("Camera", "Neutral face & posture baselines cleared for recalibration")
         }
     }
 
     func start(deviceID: String) {
+        let gen = nextGeneration(active: true)
         Task { [weak self] in
             guard let self else { return }
             let status = AVCaptureDevice.authorizationStatus(for: .video)
@@ -147,7 +176,13 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
                 granted = false
             }
 
+            guard self.isGenerationValid(gen) else {
+                AppLogger.shared.info("Camera", "Cancelled pending start (gen=\(gen) superseded)")
+                return
+            }
+
             guard granted else {
+                _ = self.nextGeneration(active: false)
                 let errCb = self.onError
                 await MainActor.run {
                     errCb?("未获得摄像头权限，请在「系统设置 → 隐私与安全性 → 相机」中允许 AlicePet 访问摄像头。")
@@ -156,29 +191,70 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             }
 
             self.captureQueue.async { [weak self] in
-                self?.configureAndStartSession(deviceID: deviceID)
+                self?.configureAndStartSession(deviceID: deviceID, generation: gen)
             }
         }
     }
 
     func stop() {
+        _ = nextGeneration(active: false)
         captureQueue.async { [weak self] in
-            guard let self else { return }
-            if self.session.isRunning {
-                self.session.stopRunning()
-            }
-            self.currentDeviceID = nil
-            self.baselineEyebrowRatio = nil
-            self.baselineMouthWidthRatio = nil
-            self.baselineTorsoPitch = nil
-            self.baselineTorsoRoll = nil
-            self.baselineHeadPitch = nil
-            self.frameCounter = 0
-            self.consecutiveNoFaceFrames = 0
+            self?.teardownSessionNow()
         }
     }
 
-    private func configureAndStartSession(deviceID: String) {
+    func stopSync() {
+        _ = nextGeneration(active: false)
+        captureQueue.sync {
+            self.teardownSessionNow()
+        }
+    }
+
+    private func teardownSessionNow() {
+        videoOutput.setSampleBufferDelegate(nil, queue: nil)
+        if session.isRunning {
+            session.stopRunning()
+        }
+        session.beginConfiguration()
+        for input in session.inputs {
+            session.removeInput(input)
+        }
+        for output in session.outputs {
+            session.removeOutput(output)
+        }
+        session.commitConfiguration()
+
+        currentDeviceID = nil
+        resetBaselinesAndFilters()
+        frameCounter = 0
+        consecutiveNoFaceFrames = 0
+        lastProcessedTimestamp = 0
+        AppLogger.shared.info("Camera", "Session stopped and all inputs/outputs released")
+    }
+
+    private func resetBaselinesAndFilters() {
+        baselineEyebrowRatio = nil
+        baselineMouthWidthRatio = nil
+        baselineShoulderWidth = nil
+        baselineShoulderCenterX = nil
+        baselineShoulderTilt = nil
+        baselineHeadPitch = nil
+        earLeftFilter.reset()
+        earRightFilter.reset()
+        jawFilter.reset()
+        smileLeftFilter.reset()
+        smileRightFilter.reset()
+        puckerFilter.reset()
+        browLeftFilter.reset()
+        browRightFilter.reset()
+    }
+
+    private func configureAndStartSession(deviceID: String, generation: Int) {
+        guard isGenerationValid(generation) else {
+            AppLogger.shared.info("Camera", "Skipped stale start before configure (gen=\(generation))")
+            return
+        }
+
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: [.builtInWideAngleCamera, .continuityCamera, .external],
             mediaType: .video,
@@ -192,19 +268,10 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             return
         }
 
-        if session.isRunning {
-            session.stopRunning()
-        }
+        teardownSessionNow()
+        guard isGenerationValid(generation) else { return }
 
         session.beginConfiguration()
-
-        for input in session.inputs {
-            session.removeInput(input)
-        }
-        for output in session.outputs {
-            session.removeOutput(output)
-        }
-
         do {
             let input = try AVCaptureDeviceInput(device: device)
             if session.canAddInput(input) {
@@ -231,18 +298,27 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         if session.canAddOutput(videoOutput) {
             session.addOutput(videoOutput)
         }
-
         session.commitConfiguration()
-        baselineEyebrowRatio = nil
-        baselineMouthWidthRatio = nil
-        baselineTorsoPitch = nil
-        baselineTorsoRoll = nil
-        baselineHeadPitch = nil
+
+        guard isGenerationValid(generation) else {
+            teardownSessionNow()
+            AppLogger.shared.info("Camera", "Aborted start right after configure because stop() was called (gen=\(generation))")
+            return
+        }
+
+        resetBaselinesAndFilters()
         preferredOrientation = .up
         frameCounter = 0
         consecutiveNoFaceFrames = 0
         currentDeviceID = deviceID
         session.startRunning()
+
+        // Double-check in case stop() arrived during startRunning() blocking call
+        if !isGenerationValid(generation) {
+            teardownSessionNow()
+            AppLogger.shared.info("Camera", "Immediately tore down session because stop() arrived during startRunning (gen=\(generation))")
+            return
+        }
         AppLogger.shared.info("Camera", "Started session on \(device.localizedName) (running=\(session.isRunning), upperBody=\(upperBodyTrackingEnabled))")
     }
 
@@ -251,8 +327,15 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard !isProcessingFrame else { return }
+        stateLock.lock()
+        let stopped = isStoppedOrStopping
+        stateLock.unlock()
+        if stopped { return }
+
+        let now = CACurrentMediaTime()
+        guard !isProcessingFrame, (now - lastProcessedTimestamp) >= minInferenceInterval else { return }
         isProcessingFrame = true
+        lastProcessedTimestamp = now
         defer { isProcessingFrame = false }
 
         frameCounter += 1
@@ -264,27 +347,18 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
 
         let mirror = mirrorMode
         let runBody = upperBodyTrackingEnabled
-        let (faceObs, bodyObs) = detectFaceAndBody(in: sampleBuffer, detectBody: runBody)
+        let (faceObs, bodyObs) = detectFaceAndBody2D(in: sampleBuffer, detectBody: runBody)
 
-        // 1. Emit 3D upper-body tracking frame if detected
-        if let bodyObs, let bodyFrame = extractUpperBodyFrame(from: bodyObs, mirror: mirror) {
-            let bodyCb = onBodyFrame
-            Task { @MainActor in
-                bodyCb?(bodyFrame)
-            }
-        }
-
-        // 2. Emit upgraded face tracking frame
         guard let face = faceObs, let landmarks = face.landmarks else {
             consecutiveNoFaceFrames += 1
-            if consecutiveNoFaceFrames == 15 {
+            if consecutiveNoFaceFrames == 12 {
                 let stateCb = onTrackingStateChanged
                 Task { @MainActor in stateCb?(false) }
             }
             return
         }
 
-        if consecutiveNoFaceFrames >= 15 || frameCounter <= 2 {
+        if consecutiveNoFaceFrames >= 12 || frameCounter <= 2 {
             let stateCb = onTrackingStateChanged
             Task { @MainActor in stateCb?(true) }
         }
@@ -297,27 +371,37 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         if baselineHeadPitch == nil {
             baselineHeadPitch = rawPitch * 0.45
         }
-        let headYaw = (mirror ? -rawYaw : rawYaw).clamped(to: -0.78...0.78)
-        let headPitch = (rawPitch - (baselineHeadPitch ?? 0)).clamped(to: -0.55...0.55)
-        let headRoll = (mirror ? -rawRoll : rawRoll).clamped(to: -0.55...0.55)
+        let headYaw = (mirror ? -rawYaw : rawYaw).clamped(to: -0.72...0.72)
+        let headPitch = (rawPitch - (baselineHeadPitch ?? 0)).clamped(to: -0.50...0.50)
+        let headRoll = (mirror ? -rawRoll : rawRoll).clamped(to: -0.50...0.50)
+
+        // Emit rock-solid 2D-geometry upper-body frame (immune to monocular 3D Z-depth jitter)
+        if let bodyObs, let bodyFrame = extractStableUpperBody(from: bodyObs, headYaw: headYaw, mirror: mirror) {
+            let bodyCb = onBodyFrame
+            Task { @MainActor in
+                bodyCb?(bodyFrame)
+            }
+        }
 
         var shapes: [String: Float] = [:]
 
-        // 2a. Rotation-invariant Eye Aspect Ratio (EAR) so head tilts don't suppress blinks
+        // 1. Filtered rotation-invariant EAR with strict open-eye deadzone (zero eyelid flutter)
         let rawLeftEAR = rotationInvariantEAR(landmarks.leftEye)
         let rawRightEAR = rotationInvariantEAR(landmarks.rightEye)
-        let leftEAR = mirror ? rawRightEAR : rawLeftEAR
-        let rightEAR = mirror ? rawLeftEAR : rawRightEAR
+        let mappedLeftEAR = mirror ? rawRightEAR : rawLeftEAR
+        let mappedRightEAR = mirror ? rawLeftEAR : rawRightEAR
 
-        if let ear = leftEAR {
-            let blink = ((0.27 - ear) / 0.13).clamped(to: 0...1)
-            let wide = ((ear - 0.35) / 0.11).clamped(to: 0...1)
+        if let earRaw = mappedLeftEAR {
+            let ear = earLeftFilter.filter(earRaw, timestamp: now)
+            let blink = ear >= 0.23 ? 0.0 : ((0.23 - ear) / 0.11).clamped(to: 0...1)
+            let wide = ear <= 0.36 ? 0.0 : ((ear - 0.36) / 0.11).clamped(to: 0...1)
             shapes[ARKitFaceBlendShapes.eyeBlinkLeft] = blink
             shapes[ARKitFaceBlendShapes.eyeWideLeft] = wide
         }
-        if let ear = rightEAR {
-            let blink = ((0.27 - ear) / 0.13).clamped(to: 0...1)
-            let wide = ((ear - 0.35) / 0.11).clamped(to: 0...1)
+        if let earRaw = mappedRightEAR {
+            let ear = earRightFilter.filter(earRaw, timestamp: now)
+            let blink = ear >= 0.23 ? 0.0 : ((0.23 - ear) / 0.11).clamped(to: 0...1)
+            let wide = ear <= 0.36 ? 0.0 : ((ear - 0.36) / 0.11).clamped(to: 0...1)
             shapes[ARKitFaceBlendShapes.eyeBlinkRight] = blink
             shapes[ARKitFaceBlendShapes.eyeWideRight] = wide
         }
@@ -331,7 +415,7 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             interOcular = 0.32
         }
 
-        // 2b. Mouth opening, smile, frown, pucker, funnel + linked cheek squint
+        // 2. Filtered mouth shapes with deadzone so closed mouth stays completely calm
         if let outer = landmarks.outerLips?.normalizedPoints, outer.count >= 6 {
             let minX = outer.map { Float($0.x) }.min() ?? 0
             let maxX = outer.map { Float($0.x) }.max() ?? 1
@@ -343,7 +427,7 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             if baselineMouthWidthRatio == nil {
                 baselineMouthWidthRatio = widthRatio
             } else if let base = baselineMouthWidthRatio {
-                baselineMouthWidthRatio = base * 0.996 + widthRatio * 0.004
+                baselineMouthWidthRatio = base * 0.997 + widthRatio * 0.003
             }
 
             let innerPoints = landmarks.innerLips?.normalizedPoints ?? outer
@@ -351,7 +435,8 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             let inMaxY = innerPoints.map { Float($0.y) }.max() ?? maxY
             let mouthOpenH = max(inMaxY - inMinY, 0) / interOcular
 
-            let jawOpen = ((mouthOpenH - 0.035) / 0.27).clamped(to: 0...1)
+            let rawJaw = ((mouthOpenH - 0.055) / 0.27).clamped(to: 0...1)
+            let jawOpen = applyDeadzone(jawFilter.filter(rawJaw, timestamp: now), threshold: 0.06)
             shapes[ARKitFaceBlendShapes.jawOpen] = jawOpen
 
             let leftCorner = outer.min(by: { $0.x < $1.x })!
@@ -359,27 +444,24 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             let midLipY = (inMinY + inMaxY) * 0.5
             let leftLift = (Float(leftCorner.y) - midLipY) / interOcular
             let rightLift = (Float(rightCorner.y) - midLipY) / interOcular
-            let smileL = ((leftLift - 0.012) / 0.075).clamped(to: 0...1)
-            let smileR = ((rightLift - 0.012) / 0.075).clamped(to: 0...1)
-            let frownL = ((-leftLift - 0.025) / 0.07).clamped(to: 0...1)
-            let frownR = ((-rightLift - 0.025) / 0.07).clamped(to: 0...1)
+            let rawSmileL = ((leftLift - 0.020) / 0.075).clamped(to: 0...1)
+            let rawSmileR = ((rightLift - 0.020) / 0.075).clamped(to: 0...1)
 
-            let outSmileL = mirror ? smileR : smileL
-            let outSmileR = mirror ? smileL : smileR
+            let outSmileL = applyDeadzone(smileLeftFilter.filter(mirror ? rawSmileR : rawSmileL, timestamp: now), threshold: 0.07)
+            let outSmileR = applyDeadzone(smileRightFilter.filter(mirror ? rawSmileL : rawSmileR, timestamp: now), threshold: 0.07)
             shapes[ARKitFaceBlendShapes.mouthSmileLeft] = outSmileL
             shapes[ARKitFaceBlendShapes.mouthSmileRight] = outSmileR
-            shapes[ARKitFaceBlendShapes.mouthFrownLeft] = mirror ? frownR : frownL
-            shapes[ARKitFaceBlendShapes.mouthFrownRight] = mirror ? frownL : frownR
-            shapes[ARKitFaceBlendShapes.cheekSquintLeft] = outSmileL * 0.45
-            shapes[ARKitFaceBlendShapes.cheekSquintRight] = outSmileR * 0.45
+            shapes[ARKitFaceBlendShapes.cheekSquintLeft] = outSmileL * 0.40
+            shapes[ARKitFaceBlendShapes.cheekSquintRight] = outSmileR * 0.40
 
             let baseW = baselineMouthWidthRatio ?? 0.95
-            let narrow = ((baseW - widthRatio) / 0.24).clamped(to: 0...1)
+            let rawNarrow = ((baseW - widthRatio) / 0.25).clamped(to: 0...1)
+            let narrow = applyDeadzone(puckerFilter.filter(rawNarrow, timestamp: now), threshold: 0.08)
             shapes[ARKitFaceBlendShapes.mouthPucker] = narrow * (1.0 - jawOpen * 0.6)
             shapes[ARKitFaceBlendShapes.mouthFunnel] = narrow * jawOpen
         }
 
-        // 2c. Eyebrows (adaptive slow drift + neutral calibration)
+        // 3. Heavily smoothed eyebrows with deadzone
         if let lBrow = centerPoint(landmarks.leftEyebrow),
            let rBrow = centerPoint(landmarks.rightEyebrow),
            let lEye = leftEyeCenter,
@@ -390,21 +472,21 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             if baselineEyebrowRatio == nil {
                 baselineEyebrowRatio = avgGap
             } else if let base = baselineEyebrowRatio {
-                baselineEyebrowRatio = base * 0.997 + avgGap * 0.003
+                baselineEyebrowRatio = base * 0.998 + avgGap * 0.002
             }
             let baseGap = baselineEyebrowRatio ?? avgGap
-            let deltaL = (mirror ? rGap : lGap) - baseGap
-            let deltaR = (mirror ? lGap : rGap) - baseGap
-            let avgDelta = (deltaL + deltaR) * 0.5
+            let dL = browLeftFilter.filter((mirror ? rGap : lGap) - baseGap, timestamp: now)
+            let dR = browRightFilter.filter((mirror ? lGap : rGap) - baseGap, timestamp: now)
+            let avgDelta = (dL + dR) * 0.5
 
-            shapes[ARKitFaceBlendShapes.browInnerUp] = (avgDelta / 0.075).clamped(to: 0...1)
-            shapes[ARKitFaceBlendShapes.browOuterUpLeft] = (deltaL / 0.075).clamped(to: 0...1)
-            shapes[ARKitFaceBlendShapes.browOuterUpRight] = (deltaR / 0.075).clamped(to: 0...1)
-            shapes[ARKitFaceBlendShapes.browDownLeft] = ((-deltaL) / 0.065).clamped(to: 0...1)
-            shapes[ARKitFaceBlendShapes.browDownRight] = ((-deltaR) / 0.065).clamped(to: 0...1)
+            shapes[ARKitFaceBlendShapes.browInnerUp] = applyDeadzone((avgDelta / 0.08).clamped(to: 0...1), threshold: 0.10)
+            shapes[ARKitFaceBlendShapes.browOuterUpLeft] = applyDeadzone((dL / 0.08).clamped(to: 0...1), threshold: 0.10)
+            shapes[ARKitFaceBlendShapes.browOuterUpRight] = applyDeadzone((dR / 0.08).clamped(to: 0...1), threshold: 0.10)
+            shapes[ARKitFaceBlendShapes.browDownLeft] = applyDeadzone(((-dL) / 0.07).clamped(to: 0...1), threshold: 0.10)
+            shapes[ARKitFaceBlendShapes.browDownRight] = applyDeadzone(((-dR) / 0.07).clamped(to: 0...1), threshold: 0.10)
         }
 
-        // 2d. Binocular averaged pupil gaze offset (more stable than single-eye)
+        // 4. Binocular averaged pupil gaze
         var gazeOffset = SIMD2<Float>(0, 0)
         let leftGaze = pupilNormalizedOffset(eye: landmarks.leftEye, pupil: landmarks.leftPupil)
         let rightGaze = pupilNormalizedOffset(eye: landmarks.rightEye, pupil: landmarks.rightPupil)
@@ -432,12 +514,12 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
     }
 
-    // MARK: - Combined Vision Face + 3D Upper-Body Detection
+    // MARK: - Combined Vision Face + Stable 2D Upper-Body Detection
 
-    private func detectFaceAndBody(
+    private func detectFaceAndBody2D(
         in sampleBuffer: CMSampleBuffer,
         detectBody: Bool
-    ) -> (VNFaceObservation?, VNHumanBodyPose3DObservation?) {
+    ) -> (VNFaceObservation?, VNHumanBodyPoseObservation?) {
         let (face, body) = performVisionRequests(in: sampleBuffer, orientation: preferredOrientation, detectBody: detectBody)
         if face != nil || body != nil {
             return (face, body)
@@ -460,12 +542,12 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         in sampleBuffer: CMSampleBuffer,
         orientation: CGImagePropertyOrientation,
         detectBody: Bool
-    ) -> (VNFaceObservation?, VNHumanBodyPose3DObservation?) {
+    ) -> (VNFaceObservation?, VNHumanBodyPoseObservation?) {
         let faceReq = VNDetectFaceLandmarksRequest()
         var requests: [VNRequest] = [faceReq]
-        var bodyReq: VNDetectHumanBodyPose3DRequest?
+        var bodyReq: VNDetectHumanBodyPoseRequest?
         if detectBody {
-            let req = VNDetectHumanBodyPose3DRequest()
+            let req = VNDetectHumanBodyPoseRequest()
             bodyReq = req
             requests.append(req)
         }
@@ -478,76 +560,91 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         }
     }
 
-    // MARK: - 3D Upper-Body Extraction (Vision Camera Space -> VRM Space)
-
-    private func extractUpperBodyFrame(
-        from obs: VNHumanBodyPose3DObservation,
+    /// Computes rock-solid upper-body lean, twist, and visible arm vectors from high-confidence 2D Vision keypoints,
+    /// avoiding noisy monocular Z-depth spikes that cause twitching on laptop webcams.
+    private func extractStableUpperBody(
+        from obs: VNHumanBodyPoseObservation,
+        headYaw: Float,
         mirror: Bool
     ) -> TrackedUpperBodyFrame? {
-        func pos3D(_ joint: VNHumanBodyPose3DObservation.JointName) -> SIMD3<Float>? {
-            guard let pt = try? obs.recognizedPoint(joint) else { return nil }
-            let c = pt.position.columns.3
-            return SIMD3<Float>(c.x, c.y, c.z)
-        }
-        func isVisibleInFrame(_ joint: VNHumanBodyPose3DObservation.JointName) -> Bool {
-            guard let imgPt = try? obs.pointInImage(joint) else { return false }
-            return imgPt.x >= 0.03 && imgPt.x <= 0.97 && imgPt.y >= 0.03 && imgPt.y <= 0.97
+        func pt(_ joint: VNHumanBodyPoseObservation.JointName, minConf: Float = 0.45) -> SIMD2<Float>? {
+            guard let p = try? obs.recognizedPoint(joint), p.confidence >= minConf else { return nil }
+            let x = Float(p.location.x)
+            let y = Float(p.location.y)
+            guard x >= 0.02 && x <= 0.98 && y >= 0.02 && y <= 0.98 else { return nil }
+            return SIMD2<Float>(x, y)
         }
 
-        guard let spinePos = pos3D(.spine) ?? pos3D(.root),
-              let centerShoulder = pos3D(.centerShoulder),
-              let lShoulder = pos3D(.leftShoulder),
-              let rShoulder = pos3D(.rightShoulder) else {
+        guard let lSh = pt(.leftShoulder, minConf: 0.40),
+              let rSh = pt(.rightShoulder, minConf: 0.40) else {
             return nil
         }
 
-        // Vision 3D camera space: +X = viewer right (user's left), +Y = up, +Z = toward camera
-        let torsoUp = simd_normalize(centerShoulder - spinePos)
-        let shoulderLine = simd_normalize(lShoulder - rShoulder) // points toward viewer-right (+X)
+        // Vision 2D normalized coordinates: x=0 left -> x=1 right, y=0 bottom -> y=1 top
+        let shCenter = (lSh + rSh) * 0.5
+        let shVec = lSh - rSh // points from user's right (viewer-left) to user's left (viewer-right)
+        let shWidth = max(simd_length(shVec), 0.05)
+        let shTilt = atan2(shVec.y, max(abs(shVec.x), 0.05))
 
-        // Torso pitch (+ = leaning forward toward camera) & roll (+ = leaning toward viewer-left)
-        let rawPitch = atan2(torsoUp.z, max(torsoUp.y, 0.25))
-        let rawRoll = -atan2(torsoUp.x, max(torsoUp.y, 0.25))
-        // Torso yaw from shoulder depth difference
-        let rawYaw = atan2(-shoulderLine.z, max(abs(shoulderLine.x), 0.25))
-
-        if baselineTorsoPitch == nil {
-            baselineTorsoPitch = rawPitch
-            baselineTorsoRoll = rawRoll
+        if baselineShoulderWidth == nil {
+            baselineShoulderWidth = shWidth
+            baselineShoulderCenterX = shCenter.x
+            baselineShoulderTilt = shTilt
         }
 
-        let pitch = ((rawPitch - (baselineTorsoPitch ?? 0)) * 0.85).clamped(to: -0.40...0.45)
-        let roll = (((mirror ? rawRoll : -rawRoll) - (mirror ? (baselineTorsoRoll ?? 0) : -(baselineTorsoRoll ?? 0))) * 0.80).clamped(to: -0.35...0.35)
-        let yaw = ((mirror ? rawYaw : -rawYaw) * 0.75).clamped(to: -0.50...0.50)
+        let baseW = baselineShoulderWidth ?? shWidth
+        let baseX = baselineShoulderCenterX ?? shCenter.x
+        let baseTilt = baselineShoulderTilt ?? shTilt
 
-        // Extract visible arms: in mirror mode, Vision's viewer-right (+X, user's left) drives VRM Left (+X)
-        // and viewer-left (-X, user's right) drives VRM Right (-X). In non-mirror mode, swap and negate X.
-        func armDir(from a: VNHumanBodyPose3DObservation.JointName, to b: VNHumanBodyPose3DObservation.JointName) -> SIMD3<Float>? {
-            guard isVisibleInFrame(a), isVisibleInFrame(b),
-                  let pa = pos3D(a), let pb = pos3D(b) else { return nil }
-            let d = pb - pa
-            guard simd_length(d) > 0.05 else { return nil }
-            let n = simd_normalize(d)
-            return mirror ? n : SIMD3<Float>(-n.x, n.y, n.z)
+        // 1. Torso Roll: smooth blend of shoulder tilt + lateral shift relative to calibrated center
+        let lateralShift = (shCenter.x - baseX) * 1.1
+        let tiltDelta = (shTilt - baseTilt) * 0.75
+        let rawRoll = -(lateralShift + tiltDelta)
+        let torsoRoll = (mirror ? rawRoll : -rawRoll).clamped(to: -0.30...0.30)
+
+        // 2. Torso Pitch: leaning closer to camera expands apparent shoulder width smoothly
+        let scaleDelta = (shWidth - baseW) / max(baseW, 0.08)
+        let torsoPitch = (scaleDelta * 0.65).clamped(to: -0.25...0.35)
+
+        // 3. Torso Yaw: gentle natural follow-through with head yaw (zero Z-depth snap!)
+        let torsoYaw = (headYaw * 0.28).clamped(to: -0.35...0.35)
+
+        // 4. Visible Arms (strict confidence >= 0.55 & inside frame so off-screen arms stay gracefully resting)
+        func armDir2D(from a: SIMD2<Float>?, to b: SIMD2<Float>?, forwardBias: Float) -> SIMD3<Float>? {
+            guard let pa = a, let pb = b else { return nil }
+            let d2 = pb - pa
+            guard simd_length(d2) > 0.04 else { return nil }
+            let dx = mirror ? d2.x : -d2.x
+            return simd_normalize(SIMD3<Float>(dx, d2.y, forwardBias))
         }
 
-        let userLeftUpper = armDir(from: .leftShoulder, to: .leftElbow)
-        let userLeftFore = armDir(from: .leftElbow, to: .leftWrist)
-        let userRightUpper = armDir(from: .rightShoulder, to: .rightElbow)
-        let userRightFore = armDir(from: .rightElbow, to: .rightWrist)
+        let lElb = pt(.leftElbow, minConf: 0.55)
+        let lWri = pt(.leftWrist, minConf: 0.55)
+        let rElb = pt(.rightElbow, minConf: 0.55)
+        let rWri = pt(.rightWrist, minConf: 0.55)
+
+        let uLeftUpper = armDir2D(from: lSh, to: lElb, forwardBias: 0.20)
+        let uLeftFore = armDir2D(from: lElb, to: lWri, forwardBias: 0.35)
+        let uRightUpper = armDir2D(from: rSh, to: rElb, forwardBias: 0.20)
+        let uRightFore = armDir2D(from: rElb, to: rWri, forwardBias: 0.35)
 
         return TrackedUpperBodyFrame(
-            torsoYaw: yaw,
-            torsoPitch: pitch,
-            torsoRoll: roll,
-            leftUpperArmDir: mirror ? userLeftUpper : userRightUpper,
-            leftForearmDir: mirror ? userLeftFore : userRightFore,
-            rightUpperArmDir: mirror ? userRightUpper : userLeftUpper,
-            rightForearmDir: mirror ? userRightFore : userLeftFore
+            torsoYaw: torsoYaw,
+            torsoPitch: torsoPitch,
+            torsoRoll: torsoRoll,
+            leftUpperArmDir: mirror ? uLeftUpper : uRightUpper,
+            leftForearmDir: mirror ? uLeftFore : uRightFore,
+            rightUpperArmDir: mirror ? uRightUpper : uLeftUpper,
+            rightForearmDir: mirror ? uRightFore : uLeftFore
         )
     }
 
-    // MARK: - Upgraded Face Geometry Helpers
+    // MARK: - Face Geometry Helpers
+
+    private func applyDeadzone(_ value: Float, threshold: Float) -> Float {
+        guard value > threshold else { return 0 }
+        return ((value - threshold) / max(1.0 - threshold, 0.01)).clamped(to: 0...1)
+    }
 
     private func centerPoint(_ region: VNFaceLandmarkRegion2D?) -> CGPoint? {
         guard let pts = region?.normalizedPoints, !pts.isEmpty else { return nil }
@@ -555,7 +652,6 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
         return CGPoint(x: sum.x / CGFloat(pts.count), y: sum.y / CGFloat(pts.count))
     }
 
-    /// Projects eye landmarks onto the eye's own corner-to-corner axis so head roll never distorts blink EAR.
     private func rotationInvariantEAR(_ eye: VNFaceLandmarkRegion2D?) -> Float? {
         guard let pts = eye?.normalizedPoints, pts.count >= 4 else { return nil }
         let pLeft = pts.min(by: { $0.x < $1.x })!
@@ -579,8 +675,7 @@ final class CameraFaceTracker: NSObject, AVCaptureVideoDataOutputSampleBufferDel
             if proj < minV { minV = proj }
             if proj > maxV { maxV = proj }
         }
-        let height = max(maxV - minV, 0)
-        return height / width
+        return max(maxV - minV, 0) / width
     }
 
     private func pupilNormalizedOffset(eye: VNFaceLandmarkRegion2D?, pupil: VNFaceLandmarkRegion2D?) -> SIMD2<Float>? {

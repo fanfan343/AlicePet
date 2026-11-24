@@ -175,11 +175,12 @@ enum UnityMuscleRetargeter {
 
         let s: Float = isLeft ? 1.0 : -1.0
         // Unity Arm Down-Up: T-pose is ~+0.25, -0.60 is natural standing arm down (~-68 deg)
+        // Unity Arm Front-Back: negative = swing forward (+Z across chest), positive = swing back (-Z)
         let downUpRad = (du * 80.0 - 20.0) * deg2rad
         let frontBackRad = fb * 85.0 * deg2rad
         let twistRad = tw * 65.0 * deg2rad
 
-        let qFrontBack = simd_quatf(angle: -s * frontBackRad, axis: SIMD3<Float>(0, 1, 0))
+        let qFrontBack = simd_quatf(angle: s * frontBackRad, axis: SIMD3<Float>(0, 1, 0))
         let qDownUp = simd_quatf(angle: s * downUpRad, axis: SIMD3<Float>(0, 0, 1))
         // X-axis axial roll is mirror-symmetric across YZ without flipping sign between left and right arms
         let qTwist = simd_quatf(angle: -twistRad, axis: SIMD3<Float>(1, 0, 0))
