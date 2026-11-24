@@ -10,7 +10,26 @@ AlicePet/.build/
 AlicePet/.swiftpm/
 AlicePet.app/
 
-# VRM model assets (large binaries & third-party licensed assets)
+# Visual regression snapshot outputs (keep folder structure via .gitkeep)
+snapshots/latest/*
+!snapshots/latest/.gitkeep
+snapshots/baseline/*
+!snapshots/baseline/.gitkeep
+
+# Reserved out-of-process AI services runtime/weights/venvs
+services/**/.venv/
+services/**/venv/
+services/**/node_modules/
+services/**/__pycache__/
+services/**/*.safetensors
+services/**/*.gguf
+services/**/*.bin
+services/**/*.onnx
+services/**/*.pt
+services/**/*.ckpt
+
+# VRM / glTF model assets (large binaries & third-party licensed assets)
 *.vrm
+*.glb
 AlicePhil(VRM) 1.01/
 降采样模型/

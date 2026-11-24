@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import Darwin
 import Foundation
 import Metal
 import MetalKit
@@ -72,6 +73,12 @@ final class PetController: NSObject, MTKViewDelegate {
     private var activeCustomExpression: String?
     private var blinkTimer: Timer?
     private var startTime: TimeInterval = CACurrentMediaTime()
+
+    // Lightweight periodic performance baseline sampler
+    private var perfWindowStart: TimeInterval = CACurrentMediaTime()
+    private var perfFrameCount: Int = 0
+    private var perfEncodeMsSum: Double = 0
+    private let perfLogIntervalSeconds: TimeInterval = 60.0
 
     private var restNodeTransforms: [Int: (pos: SIMD3<Float>, rot: simd_quatf, scale: SIMD3<Float>)] = [:]
     private var outfitNodeMeshes: [String: (nodeIndex: Int, meshIndex: Int)] = [:]
@@ -569,6 +576,7 @@ final class PetController: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        let frameStart = CACurrentMediaTime()
         guard let drawable = view.currentDrawable,
               let descriptor = view.currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -583,7 +591,7 @@ final class PetController: NSObject, MTKViewDelegate {
         renderer.projectionMatrix = camera.projectionMatrix(aspect: aspect)
         renderer.viewMatrix = camera.viewMatrix
 
-        let elapsed = Float(CACurrentMediaTime() - startTime)
+        let elapsed = Float(frameStart - startTime)
         updateProceduralMotion(in: view, elapsed: elapsed)
 
         let drawProps = propRenderer.hasActiveProps
@@ -616,6 +624,42 @@ final class PetController: NSObject, MTKViewDelegate {
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
+        recordPerfSample(frameStart: frameStart)
+    }
+
+    private func recordPerfSample(frameStart: TimeInterval) {
+        let now = CACurrentMediaTime()
+        perfFrameCount += 1
+        perfEncodeMsSum += (now - frameStart) * 1000.0
+        let window = now - perfWindowStart
+        guard window >= perfLogIntervalSeconds, perfFrameCount > 0 else { return }
+
+        let fps = Double(perfFrameCount) / window
+        let avgEncodeMs = perfEncodeMsSum / Double(perfFrameCount)
+        let memMB = Self.currentMemoryFootprintMB()
+        let camFlag = cameraTrackingActive ? "on" : "off"
+        AppLogger.shared.info(
+            "Perf",
+            String(
+                format: "fps=%.1f avgEncodeMs=%.2f memMB=%.1f pose=%@ props=%@ cam=%@",
+                fps, avgEncodeMs, memMB, poseMode.rawValue, propRenderer.activePropMode.rawValue, camFlag
+            )
+        )
+        perfWindowStart = now
+        perfFrameCount = 0
+        perfEncodeMsSum = 0
+    }
+
+    private static func currentMemoryFootprintMB() -> Double {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
+            }
+        }
+        guard kerr == KERN_SUCCESS else { return -1.0 }
+        return Double(info.phys_footprint) / (1024.0 * 1024.0)
     }
 
     private func computeBookWorldMatrix(time: Float) -> simd_float4x4 {
