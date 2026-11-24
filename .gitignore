@@ -1,0 +1,16 @@
+.DS_Store
+*.log
+logs/
+*.png
+*.mov
+*.wav
+
+# SwiftPM & macOS app bundle artifacts
+AlicePet/.build/
+AlicePet/.swiftpm/
+AlicePet.app/
+
+# VRM model assets (large binaries & third-party licensed assets)
+*.vrm
+AlicePhil(VRM) 1.01/
+降采样模型/
