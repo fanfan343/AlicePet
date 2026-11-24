@@ -2,7 +2,12 @@ import AppKit
 import Foundation
 import VRMMetalKit
 
-let defaultModelPath = "/Users/funnyliu/Downloads/VRM项目/降采样模型/Alicephil VRM (LightShapekey) (TexLite).vrm"
+let preferredDefaultModelPaths = [
+    "/Users/funnyliu/Downloads/VRM项目/降采样模型/Alicephil VRM (TexLite).vrm",
+    "/Users/funnyliu/Downloads/VRM项目/降采样模型/Alicephil VRM (LightShapekey) (TexLite).vrm",
+]
+let defaultModelPath = preferredDefaultModelPaths.first(where: { FileManager.default.fileExists(atPath: $0) })
+    ?? preferredDefaultModelPaths[0]
 
 func parseArg(_ flag: String) -> String? {
     let args = CommandLine.arguments
@@ -33,6 +38,15 @@ if let snapshotPath = parseArg("--snapshot") {
             let controller = try PetController(sampleCount: 1)
             try await controller.loadModel(from: modelURL, synchronousPhysics: true)
 
+            if let viewRaw = parseArg("--view"), let preset = CameraViewPreset(rawValue: viewRaw) {
+                controller.camera.apply(preset: preset)
+            }
+            if let yawStr = parseArg("--yaw"), let yawDeg = Float(yawStr) {
+                controller.camera.yaw = yawDeg * .pi / 180.0
+            }
+            if let pitchStr = parseArg("--pitch"), let pitchDeg = Float(pitchStr) {
+                controller.camera.pitch = pitchDeg * .pi / 180.0
+            }
             if let lightRaw = parseArg("--lighting"), let preset = LightingPreset(rawValue: lightRaw) {
                 controller.setLightingPreset(preset)
             }

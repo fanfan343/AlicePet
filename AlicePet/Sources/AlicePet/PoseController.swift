@@ -41,6 +41,7 @@ final class PoseController: MotionSource {
     private(set) var restNodeTransforms: [Int: NodeRestTransform] = [:]
     private(set) var hairNodeIndices: [String: Int] = [:]
     private var poseStartTime: Float = 0
+    private var playAFKIntro: Bool = false
 
     func captureRestPose(from model: VRMModel) {
         restNodeTransforms.removeAll()
@@ -61,9 +62,12 @@ final class PoseController: MotionSource {
         animationPlayer.load(from: folderURL)
     }
 
-    func setPoseMode(_ mode: PetPoseMode, at elapsed: Float = 0) {
+    func setPoseMode(_ mode: PetPoseMode, at elapsed: Float = 0, playIntro: Bool = true) {
+        let wasAFK = (poseMode == .afkBook || poseMode == .afkTea)
+        let willAFK = (mode == .afkBook || mode == .afkTea)
         poseMode = mode
         poseStartTime = elapsed
+        playAFKIntro = playIntro && willAFK && !wasAFK && (animationPlayer.clip(named: "afk_in") != nil)
     }
 
     func setHandGesture(_ preset: HandGesturePreset, side: HandSide) {
@@ -104,8 +108,18 @@ final class PoseController: MotionSource {
     ) {
         let localTime = max(0, t - poseStartTime)
 
-        // If the active pose is a time-varying author clip (e.g. 16.67s Alice_AFK_Loop), evaluate it live
-        if let clip = activeAuthorClip(), clip.duration > 0.05 {
+        // If entering AFK interactively, play Alice_AFK_In (5s) first then seamlessly transition to Alice_AFK_Loop
+        if playAFKIntro, let introClip = animationPlayer.clip(named: "afk_in") {
+            if localTime < introClip.duration {
+                applyAuthorClip(introClip, at: localTime, to: model, restTransforms: restTransforms)
+            } else {
+                playAFKIntro = false
+                poseStartTime = t
+                if let loopClip = activeAuthorClip() {
+                    applyAuthorClip(loopClip, at: 0, to: model, restTransforms: restTransforms)
+                }
+            }
+        } else if let clip = activeAuthorClip(), clip.duration > 0.05 {
             applyAuthorClip(clip, at: localTime, to: model, restTransforms: restTransforms)
         }
 

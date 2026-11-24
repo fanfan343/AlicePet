@@ -396,9 +396,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
+        let viewMenu = NSMenu()
+        for preset in CameraViewPreset.allCases {
+            let item = NSMenuItem(title: preset.displayTitle, action: #selector(selectCameraViewPreset(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset.rawValue
+            viewMenu.addItem(item)
+        }
+        viewMenu.addItem(.separator())
         let resetCamItem = NSMenuItem(title: "重置视角与平移 (或双击角色)", action: #selector(resetCamera), keyEquivalent: "")
         resetCamItem.target = self
-        menu.addItem(resetCamItem)
+        viewMenu.addItem(resetCamItem)
+        let viewRoot = NSMenuItem(title: "视角机位 (Camera)", action: nil, keyEquivalent: "")
+        viewRoot.submenu = viewMenu
+        menu.addItem(viewRoot)
 
         let openItem = NSMenuItem(title: "更换 VRM 模型…", action: #selector(openModelPanel), keyEquivalent: "o")
         openItem.target = self
@@ -590,6 +601,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleAutoBlink() {
         controller.autoBlinkEnabled.toggle()
         refreshMenus()
+    }
+
+    @objc private func selectCameraViewPreset(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let preset = CameraViewPreset(rawValue: raw) else { return }
+        controller.camera.apply(preset: preset)
     }
 
     @objc private func resetCamera() {
