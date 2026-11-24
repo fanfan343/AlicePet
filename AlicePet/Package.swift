@@ -19,7 +19,8 @@ let package = Package(
         .executableTarget(
             name: "AlicePet",
             dependencies: [
-                .product(name: "VRMMetalKit", package: "VRMMetalKit")
+                .product(name: "VRMMetalKit", package: "VRMMetalKit"),
+                .product(name: "GLTFMetalKit", package: "VRMMetalKit")
             ],
             linkerSettings: [
                 .unsafeFlags([

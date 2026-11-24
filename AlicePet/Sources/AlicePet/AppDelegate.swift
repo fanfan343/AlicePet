@@ -73,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mtkView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         mtkView.colorPixelFormat = .bgra8Unorm
         mtkView.depthStencilPixelFormat = .depth32Float
+        mtkView.depthStencilStorageMode = .private
         mtkView.sampleCount = 4
         mtkView.preferredFramesPerSecond = 60
         mtkView.delegate = controller
@@ -119,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             do {
                 try await controller.loadModel(from: initialModelURL)
+                refreshMenus()
                 let cameras = CameraFaceTracker.availableCameras()
                 AppLogger.shared.info("Camera", "Detected \(cameras.count) camera(s): \(cameras.map(\.name).joined(separator: ", "))")
                 if autoConnectIPhoneCamera, let iphoneCam = cameras.first(where: { $0.isContinuityCamera }) {
@@ -151,13 +153,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(titleItem)
         menu.addItem(.separator())
 
-        // Camera face capture submenu (Mac / iPhone Continuity Camera)
+        // 1. Camera face capture submenu (Mac / iPhone Continuity Camera)
         let camMenu = NSMenu()
-        let stopCamItem = NSMenuItem(
-            title: "关闭摄像头捕捉",
-            action: #selector(stopCameraCapture),
-            keyEquivalent: ""
-        )
+        let stopCamItem = NSMenuItem(title: "关闭摄像头捕捉", action: #selector(stopCameraCapture), keyEquivalent: "")
         stopCamItem.target = self
         stopCamItem.state = controller.cameraTrackingActive ? .off : .on
         camMenu.addItem(stopCamItem)
@@ -170,11 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             camMenu.addItem(emptyItem)
         } else {
             for cam in cameras {
-                let item = NSMenuItem(
-                    title: cam.displayTitle,
-                    action: #selector(selectCameraDevice(_:)),
-                    keyEquivalent: ""
-                )
+                let item = NSMenuItem(title: cam.displayTitle, action: #selector(selectCameraDevice(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = cam.id
                 item.state = (controller.activeCameraID == cam.id) ? .on : .off
@@ -183,48 +177,130 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         camMenu.addItem(.separator())
-        let autoIPhoneItem = NSMenuItem(
-            title: "启动时自动连接 iPhone 相机",
-            action: #selector(toggleAutoConnectIPhone),
-            keyEquivalent: ""
-        )
+        let autoIPhoneItem = NSMenuItem(title: "启动时自动连接 iPhone 相机", action: #selector(toggleAutoConnectIPhone), keyEquivalent: "")
         autoIPhoneItem.target = self
         autoIPhoneItem.state = autoConnectIPhoneCamera ? .on : .off
         camMenu.addItem(autoIPhoneItem)
 
-        let mirrorItem = NSMenuItem(
-            title: "镜像左右表情 (Mirror)",
-            action: #selector(toggleCameraMirror),
-            keyEquivalent: ""
-        )
+        let mirrorItem = NSMenuItem(title: "镜像左右表情 (Mirror)", action: #selector(toggleCameraMirror), keyEquivalent: "")
         mirrorItem.target = self
         mirrorItem.state = controller.cameraTracker.mirrorMode ? .on : .off
         camMenu.addItem(mirrorItem)
 
-        let refreshCamItem = NSMenuItem(
-            title: "刷新摄像头列表",
-            action: #selector(refreshCameraList),
-            keyEquivalent: ""
-        )
+        let refreshCamItem = NSMenuItem(title: "刷新摄像头列表", action: #selector(refreshCameraList), keyEquivalent: "")
         refreshCamItem.target = self
         camMenu.addItem(refreshCamItem)
 
-        let camRoot = NSMenuItem(
-            title: controller.cameraTrackingActive ? "摄像头捕捉 (运行中)" : "摄像头捕捉 (Mac / iPhone)",
-            action: nil,
-            keyEquivalent: ""
-        )
+        let camRoot = NSMenuItem(title: controller.cameraTrackingActive ? "摄像头捕捉 (运行中)" : "摄像头捕捉 (Mac / iPhone)", action: nil, keyEquivalent: "")
         camRoot.submenu = camMenu
         menu.addItem(camRoot)
 
-        // Expression test submenu
+        // 2. Pose & AFK Mode Submenu
+        let poseMenu = NSMenu()
+        for mode in PetPoseMode.allCases {
+            let item = NSMenuItem(title: mode.displayTitle, action: #selector(selectPoseMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = (controller.poseMode == mode) ? .on : .off
+            poseMenu.addItem(item)
+        }
+        poseMenu.addItem(.separator())
+        let autoPropItem = NSMenuItem(title: "道具显示：随姿态自动", action: #selector(selectPropOverride(_:)), keyEquivalent: "")
+        autoPropItem.target = self
+        autoPropItem.representedObject = "__auto__"
+        autoPropItem.state = (controller.manualPropOverride == nil) ? .on : .off
+        poseMenu.addItem(autoPropItem)
+
+        let propChoices: [(String, PropSceneRenderer.ActivePropMode)] = [
+            ("单独显示：魔法书 (Book)", .bookOnly),
+            ("单独显示：下午茶套装 (Tea Set)", .teaSetOnly),
+            ("全部道具同时显示", .bookAndTea),
+            ("隐藏全部独立道具", .none),
+        ]
+        for (title, mode) in propChoices {
+            let item = NSMenuItem(title: title, action: #selector(selectPropOverride(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = (controller.manualPropOverride == mode) ? .on : .off
+            poseMenu.addItem(item)
+        }
+        let poseRoot = NSMenuItem(title: "姿态与 AFK 状态 (\(controller.poseMode.displayTitle))", action: nil, keyEquivalent: "")
+        poseRoot.submenu = poseMenu
+        menu.addItem(poseRoot)
+
+        // 3. Hand Gesture Submenu
+        let handMenu = NSMenu()
+        let bothMenu = NSMenu()
+        let leftMenu = NSMenu()
+        let rightMenu = NSMenu()
+        for preset in HandGesturePreset.allCases {
+            let bItem = NSMenuItem(title: preset.displayTitle, action: #selector(selectBothHandGesture(_:)), keyEquivalent: "")
+            bItem.target = self
+            bItem.representedObject = preset.rawValue
+            bItem.state = (controller.leftHandGesture == preset && controller.rightHandGesture == preset) ? .on : .off
+            bothMenu.addItem(bItem)
+
+            let lItem = NSMenuItem(title: preset.displayTitle, action: #selector(selectLeftHandGesture(_:)), keyEquivalent: "")
+            lItem.target = self
+            lItem.representedObject = preset.rawValue
+            lItem.state = (controller.leftHandGesture == preset) ? .on : .off
+            leftMenu.addItem(lItem)
+
+            let rItem = NSMenuItem(title: preset.displayTitle, action: #selector(selectRightHandGesture(_:)), keyEquivalent: "")
+            rItem.target = self
+            rItem.representedObject = preset.rawValue
+            rItem.state = (controller.rightHandGesture == preset) ? .on : .off
+            rightMenu.addItem(rItem)
+        }
+        let bothRoot = NSMenuItem(title: "双手同步", action: nil, keyEquivalent: "")
+        bothRoot.submenu = bothMenu
+        let leftRoot = NSMenuItem(title: "左手 (\(controller.leftHandGesture.rawValue))", action: nil, keyEquivalent: "")
+        leftRoot.submenu = leftMenu
+        let rightRoot = NSMenuItem(title: "右手 (\(controller.rightHandGesture.rawValue))", action: nil, keyEquivalent: "")
+        rightRoot.submenu = rightMenu
+        handMenu.addItem(bothRoot)
+        handMenu.addItem(leftRoot)
+        handMenu.addItem(rightRoot)
+        let handRoot = NSMenuItem(title: "手势配方 (Hands)", action: nil, keyEquivalent: "")
+        handRoot.submenu = handMenu
+        menu.addItem(handRoot)
+
+        // 4. Outfit & Hair Submenu
+        let outfitMenu = NSMenu()
+        let outfitToggles: [(String, Selector, Bool)] = [
+            ("连衣裙 (Dress)", #selector(toggleOutfitDress), controller.outfitState.showDress),
+            ("丝袜 (Pantyhose)", #selector(toggleOutfitPantyhose), controller.outfitState.showPantyhose),
+            ("鞋子 (Shoes)", #selector(toggleOutfitShoes), controller.outfitState.showShoes),
+            ("发箍 (HairBand)", #selector(toggleOutfitHairBand), controller.outfitState.showHairBand),
+            ("胸前蝴蝶结 (ChestRibbon)", #selector(toggleOutfitChestRibbon), controller.outfitState.showChestRibbon),
+            ("侧发 (HairSide)", #selector(toggleOutfitHairSide), controller.outfitState.showHairSide),
+        ]
+        for (title, sel, active) in outfitToggles {
+            let item = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+            item.target = self
+            item.state = active ? .on : .off
+            outfitMenu.addItem(item)
+        }
+        outfitMenu.addItem(.separator())
+        for style in HairStyleOption.allCases {
+            let item = NSMenuItem(title: style.displayTitle, action: #selector(selectHairStyle(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = style.rawValue
+            item.state = (controller.outfitState.hairStyle == style) ? .on : .off
+            outfitMenu.addItem(item)
+        }
+        let outfitRoot = NSMenuItem(title: "换装与发型", action: nil, keyEquivalent: "")
+        outfitRoot.submenu = outfitMenu
+        menu.addItem(outfitRoot)
+
+        // 5. Expression Presets Submenu
         let exprMenu = NSMenu()
         let presets: [(String, VRMExpressionPreset?)] = [
-            ("Neutral (默认)", nil),
-            ("Joy / Happy (开心)", .happy),
+            ("Neutral (重置默认)", nil),
+            ("Happy (开心)", .happy),
             ("Angry (生气)", .angry),
-            ("Sorrow / Sad (悲伤)", .sad),
-            ("Fun / Relaxed (放松)", .relaxed),
+            ("Sad (委屈)", .sad),
+            ("Relaxed (放松)", .relaxed),
         ]
         for (label, preset) in presets {
             let item = NSMenuItem(title: label, action: #selector(selectPresetMood(_:)), keyEquivalent: "")
@@ -232,31 +308,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.representedObject = preset?.rawValue ?? "__neutral__"
             exprMenu.addItem(item)
         }
-        exprMenu.addItem(.separator())
-        let customSamples = [
-            "eyes winkL",
-            "eyes winkR",
-            "eyes sarcastic",
-            "eyes shock",
-            "mouth smile",
-            "mouth ω",
-            "nihihi",
-            "Surprised",
-            "JawOpen",
-        ]
-        for name in customSamples {
-            let item = NSMenuItem(title: name, action: #selector(selectCustomExpression(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = name
-            exprMenu.addItem(item)
+        if !controller.recipeStore.availableFaceRecipes.isEmpty {
+            exprMenu.addItem(.separator())
+            for entry in controller.recipeStore.availableFaceRecipes {
+                let item = NSMenuItem(title: entry.title, action: #selector(selectCustomExpression(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = entry.id
+                exprMenu.addItem(item)
+            }
         }
-        let exprRoot = NSMenuItem(title: "表情测试", action: nil, keyEquivalent: "")
+        let exprRoot = NSMenuItem(title: "表情配方 (\(controller.recipeStore.availableFaceRecipes.count) 套)", action: nil, keyEquivalent: "")
         exprRoot.submenu = exprMenu
         menu.addItem(exprRoot)
 
         menu.addItem(.separator())
 
-        // Toggles
+        // 6. Window & Renderer toggles
         let clickItem = NSMenuItem(title: "鼠标穿透 (Click-Through)", action: #selector(toggleClickThrough), keyEquivalent: "")
         clickItem.target = self
         clickItem.state = isClickThrough ? .on : .off
@@ -305,6 +372,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return menu
     }
 
+    // MARK: - Actions
+
     @objc private func selectCameraDevice(_ sender: NSMenuItem) {
         guard let deviceID = sender.representedObject as? String else { return }
         controller.startCameraCapture(deviceID: deviceID)
@@ -334,6 +403,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refreshCameraList() {
+        refreshMenus()
+    }
+
+    @objc private func selectPoseMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = PetPoseMode(rawValue: raw) else { return }
+        controller.setPoseMode(mode)
+        refreshMenus()
+    }
+
+    @objc private func selectPropOverride(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        if raw == "__auto__" {
+            controller.manualPropOverride = nil
+        } else if let mode = PropSceneRenderer.ActivePropMode(rawValue: raw) {
+            controller.manualPropOverride = mode
+        }
+        refreshMenus()
+    }
+
+    @objc private func selectBothHandGesture(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let preset = HandGesturePreset(rawValue: raw) else { return }
+        controller.setHandGesture(preset, side: .both)
+        refreshMenus()
+    }
+
+    @objc private func selectLeftHandGesture(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let preset = HandGesturePreset(rawValue: raw) else { return }
+        controller.setHandGesture(preset, side: .left)
+        refreshMenus()
+    }
+
+    @objc private func selectRightHandGesture(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let preset = HandGesturePreset(rawValue: raw) else { return }
+        controller.setHandGesture(preset, side: .right)
+        refreshMenus()
+    }
+
+    @objc private func toggleOutfitDress() {
+        controller.outfitState.showDress.toggle()
+        controller.applyOutfitState()
+        refreshMenus()
+    }
+
+    @objc private func toggleOutfitPantyhose() {
+        controller.outfitState.showPantyhose.toggle()
+        controller.applyOutfitState()
+        refreshMenus()
+    }
+
+    @objc private func toggleOutfitShoes() {
+        controller.outfitState.showShoes.toggle()
+        controller.applyOutfitState()
+        refreshMenus()
+    }
+
+    @objc private func toggleOutfitHairBand() {
+        controller.outfitState.showHairBand.toggle()
+        controller.applyOutfitState()
+        refreshMenus()
+    }
+
+    @objc private func toggleOutfitChestRibbon() {
+        controller.outfitState.showChestRibbon.toggle()
+        controller.applyOutfitState()
+        refreshMenus()
+    }
+
+    @objc private func toggleOutfitHairSide() {
+        controller.outfitState.showHairSide.toggle()
+        controller.applyOutfitState()
+        refreshMenus()
+    }
+
+    @objc private func selectHairStyle(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let style = HairStyleOption(rawValue: raw) else { return }
+        controller.outfitState.hairStyle = style
+        controller.applyOutfitState()
         refreshMenus()
     }
 
@@ -391,6 +542,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel.runModal() == .OK, let url = panel.url {
             Task { @MainActor in
                 try? await controller.loadModel(from: url)
+                refreshMenus()
             }
         }
     }

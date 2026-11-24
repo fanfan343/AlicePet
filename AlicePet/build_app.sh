@@ -8,16 +8,16 @@ cd "$PKG_DIR"
 swift build
 
 BIN_PATH=".build/debug/AlicePet"
-BUNDLE_SRC=$(find .build -name "VRMMetalKit_VRMMetalKit.bundle" -type d | head -n 1)
+BIN_DIR="$(dirname "$(find .build/debug -maxdepth 1 -name AlicePet -type f 2>/dev/null || echo .build/debug/AlicePet)")"
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/AlicePet"
 cp "$PKG_DIR/Info.plist" "$APP_DIR/Contents/Info.plist"
-if [ -n "${BUNDLE_SRC:-}" ]; then
-    cp -R "$BUNDLE_SRC" "$APP_DIR/Contents/Resources/"
-fi
+for b in $(find .build -name "VRMMetalKit_*.bundle" -type d); do
+    cp -R "$b" "$APP_DIR/Contents/Resources/"
+done
 
 codesign --force --deep --sign - "$APP_DIR"
 echo "Built $APP_DIR"
