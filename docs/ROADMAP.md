@@ -19,8 +19,8 @@
 - [ ] 接入 1–2 个非 Alice 的通用 VRM 模型验证跨模型兼容性
 
 ## Stage 3：动作系统深化（VRMA + Kimodo / ARDY）
-- [ ] 定义统一的 `MotionSource` 协议（逐帧提供标准 VRM Humanoid 骨骼旋转 + 根位移）
-- [ ] 支持加载播放标准 `.vrma` 动画文件与动作平滑过渡
+- [x] 定义统一的 `MotionSource` 协议，并实现原版 Unity Humanoid 肌肉动画提取器（`tools/extract_alice_animations.py`）与实时重定向播放器（`UnityMuscleRetargeter` + `AuthorAnimationPlayer`），还原作者原版 Stand / Sit / Crouch / Prone / 16.67s AFK 循环动作
+- [ ] 支持加载播放标准 `.vrma` 动画文件与姿态间平滑过渡（Crossfade）
 - [ ] 在 `services/motion/` 中以独立本地子服务方式接入 **Kimodo / ARDY** 实时动作生成与骨架重定向
 
 ## Stage 4：面捕精度进阶

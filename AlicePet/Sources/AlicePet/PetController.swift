@@ -147,6 +147,7 @@ final class PetController: NSObject, MTKViewDelegate {
         expressionMixer.initializeForModel(loaded, renderer: renderer)
         recipeStore.loadRecipes(near: url, profile: profile)
         recipeStore.registerExpressions(on: loaded, controller: renderer.expressionController, profile: profile)
+        poseController.loadAuthorAnimations(from: recipeStore.assetsFolderURL)
 
         if let folder = recipeStore.assetsFolderURL {
             await propRenderer.loadProps(from: folder)
@@ -187,7 +188,8 @@ final class PetController: NSObject, MTKViewDelegate {
     }
 
     func setPoseMode(_ mode: PetPoseMode) {
-        poseController.setPoseMode(mode)
+        let elapsed = Float(CACurrentMediaTime() - startTime)
+        poseController.setPoseMode(mode, at: elapsed)
         syncPropRendererMode()
         applyAllBodyAndOutfitState(settlePhysics: true)
         AppLogger.shared.info("Pose", "Switched poseMode=\(mode.rawValue), propMode=\(propRenderer.activePropMode.rawValue)")
@@ -269,18 +271,24 @@ final class PetController: NSObject, MTKViewDelegate {
             return
         }
         switch poseMode {
-        case .stand, .sit:
+        case .stand, .sit, .crouch, .prone:
             propRenderer.activePropMode = .none
         case .afkBook:
-            propRenderer.activePropMode = .bookOnly
+            propRenderer.activePropMode = .bookAndTea
         case .afkTea:
             propRenderer.activePropMode = .teaSetOnly
         }
     }
 
-    private func applyAllBodyAndOutfitState(settlePhysics: Bool) {
+    private func applyAllBodyAndOutfitState(settlePhysics: Bool, animTime: Float = 0) {
         guard let model else { return }
-        poseController.applyAll(to: model, recipeStore: recipeStore, profile: activeProfile, hairStyle: outfitState.hairStyle)
+        poseController.applyAll(
+            to: model,
+            recipeStore: recipeStore,
+            profile: activeProfile,
+            hairStyle: outfitState.hairStyle,
+            at: animTime
+        )
         applyOutfitState()
         if settlePhysics {
             settleSpringBonePhysics()
@@ -445,7 +453,7 @@ final class PetController: NSObject, MTKViewDelegate {
     // MARK: - Offscreen Snapshot (CLI verification)
 
     func renderSnapshot(to outputURL: URL, width: Int = 720, height: Int = 1024, animTime: Float = 0.8) async throws {
-        settleSpringBonePhysics(warmupSteps: 28)
+        applyAllBodyAndOutfitState(settlePhysics: true, animTime: animTime)
 
         let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,

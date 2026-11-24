@@ -28,20 +28,19 @@ struct NodeRestTransform {
     let scale: SIMD3<Float>
 }
 
-/// Manages body poses, hand gestures, hair style bone adjustments, and per-frame procedural motion.
+/// Manages authentic author-authored Unity muscle clips (with procedural fallback for generic VRMs),
+/// hand gesture overrides, hair style bone adjustments, and per-frame animation playback.
 @MainActor
 final class PoseController: MotionSource {
+    let animationPlayer = AuthorAnimationPlayer()
+
     private(set) var poseMode: PetPoseMode = .stand
     private(set) var leftHandGesture: HandGesturePreset = .natural
     private(set) var rightHandGesture: HandGesturePreset = .natural
 
     private(set) var restNodeTransforms: [Int: NodeRestTransform] = [:]
     private(set) var hairNodeIndices: [String: Int] = [:]
-
-    private let afkBookChestPitchDeg: Float = 10.0
-    private let afkBookChestYawDeg: Float = -6.0
-    private let afkTeaChestPitchDeg: Float = 4.0
-    private let afkTeaChestYawDeg: Float = -5.0
+    private var poseStartTime: Float = 0
 
     func captureRestPose(from model: VRMModel) {
         restNodeTransforms.removeAll()
@@ -58,25 +57,34 @@ final class PoseController: MotionSource {
         }
     }
 
-    func setPoseMode(_ mode: PetPoseMode) {
+    func loadAuthorAnimations(from folderURL: URL?) {
+        animationPlayer.load(from: folderURL)
+    }
+
+    func setPoseMode(_ mode: PetPoseMode, at elapsed: Float = 0) {
         poseMode = mode
+        poseStartTime = elapsed
     }
 
     func setHandGesture(_ preset: HandGesturePreset, side: HandSide) {
         switch side {
-        case .left:
-            leftHandGesture = preset
-        case .right:
-            rightHandGesture = preset
+        case .left: leftHandGesture = preset
+        case .right: rightHandGesture = preset
         case .both:
             leftHandGesture = preset
             rightHandGesture = preset
         }
     }
 
-    func applyAll(to model: VRMModel, recipeStore: AssetRecipeStore, profile: ModelProfile, hairStyle: HairStyleOption) {
-        applyBasePose(to: model, restTransforms: restNodeTransforms)
-        applyHandGestures(to: model, recipeStore: recipeStore)
+    func applyAll(
+        to model: VRMModel,
+        recipeStore: AssetRecipeStore,
+        profile: ModelProfile,
+        hairStyle: HairStyleOption,
+        at animTime: Float = 0
+    ) {
+        applyAuthorOrFallbackPose(to: model, restTransforms: restNodeTransforms, clipTime: animTime)
+        applyHandGestureOverrides(to: model, recipeStore: recipeStore)
         applyHairStyle(hairStyle, profile: profile, to: model)
         model.updateNodeTransforms()
     }
@@ -84,83 +92,7 @@ final class PoseController: MotionSource {
     // MARK: - MotionSource
 
     func applyBasePose(to model: VRMModel, restTransforms: [Int: NodeRestTransform]) {
-        let bodyBones: [VRMHumanoidBone] = [
-            .hips, .spine, .chest, .upperChest, .neck, .head,
-            .leftShoulder, .leftUpperArm, .leftLowerArm, .leftHand,
-            .rightShoulder, .rightUpperArm, .rightLowerArm, .rightHand,
-            .leftUpperLeg, .leftLowerLeg, .leftFoot, .leftToes,
-            .rightUpperLeg, .rightLowerLeg, .rightFoot, .rightToes
-        ]
-        resetHumanoidBones(bodyBones, on: model, restTransforms: restTransforms)
-
-        switch poseMode {
-        case .stand:
-            rotateBone(.leftUpperArm, on: model, restTransforms: restTransforms, roll: -62)
-            rotateBone(.rightUpperArm, on: model, restTransforms: restTransforms, roll: 62)
-            rotateBone(.leftLowerArm, on: model, restTransforms: restTransforms, yaw: -12)
-            rotateBone(.rightLowerArm, on: model, restTransforms: restTransforms, yaw: 12)
-
-        case .sit:
-            translateBone(.hips, on: model, restTransforms: restTransforms, offset: SIMD3<Float>(0, -0.18, 0))
-            rotateBone(.hips, on: model, restTransforms: restTransforms, pitch: -4)
-            rotateBone(.spine, on: model, restTransforms: restTransforms, pitch: 5)
-            rotateBone(.leftUpperLeg, on: model, restTransforms: restTransforms, yaw: 6, pitch: -82, roll: -4)
-            rotateBone(.rightUpperLeg, on: model, restTransforms: restTransforms, yaw: -6, pitch: -82, roll: 4)
-            rotateBone(.leftLowerLeg, on: model, restTransforms: restTransforms, pitch: 82)
-            rotateBone(.rightLowerLeg, on: model, restTransforms: restTransforms, pitch: 82)
-            rotateBone(.leftFoot, on: model, restTransforms: restTransforms, pitch: 12)
-            rotateBone(.rightFoot, on: model, restTransforms: restTransforms, pitch: 12)
-
-            rotateBone(.leftUpperArm, on: model, restTransforms: restTransforms, yaw: -16, pitch: -12, roll: -58)
-            rotateBone(.rightUpperArm, on: model, restTransforms: restTransforms, yaw: 16, pitch: -12, roll: 58)
-            rotateBone(.leftLowerArm, on: model, restTransforms: restTransforms, yaw: -42, pitch: -14)
-            rotateBone(.rightLowerArm, on: model, restTransforms: restTransforms, yaw: 42, pitch: -14)
-
-        case .afkBook:
-            translateBone(.hips, on: model, restTransforms: restTransforms, offset: SIMD3<Float>(0, 0.04, 0))
-            rotateBone(.hips, on: model, restTransforms: restTransforms, yaw: -6, pitch: -8, roll: 3)
-            rotateBone(.spine, on: model, restTransforms: restTransforms, yaw: 4, pitch: 8)
-            rotateBone(.chest, on: model, restTransforms: restTransforms, yaw: afkBookChestYawDeg, pitch: afkBookChestPitchDeg)
-            rotateBone(.neck, on: model, restTransforms: restTransforms, yaw: 4, pitch: 12)
-            rotateBone(.head, on: model, restTransforms: restTransforms, yaw: 0, pitch: 8)
-
-            // Gentle floating legs tuned to stay completely clear of skirt mesh
-            rotateBone(.leftUpperLeg, on: model, restTransforms: restTransforms, yaw: 3, pitch: -15, roll: -3)
-            rotateBone(.leftLowerLeg, on: model, restTransforms: restTransforms, pitch: 34)
-            rotateBone(.leftFoot, on: model, restTransforms: restTransforms, pitch: 18)
-            rotateBone(.rightUpperLeg, on: model, restTransforms: restTransforms, yaw: -3, pitch: -21, roll: 3)
-            rotateBone(.rightLowerLeg, on: model, restTransforms: restTransforms, pitch: 44)
-            rotateBone(.rightFoot, on: model, restTransforms: restTransforms, pitch: 22)
-
-            // Arms brought forward toward open book
-            rotateBone(.leftUpperArm, on: model, restTransforms: restTransforms, yaw: -36, pitch: -22, roll: -52)
-            rotateBone(.leftLowerArm, on: model, restTransforms: restTransforms, yaw: -52, pitch: -16)
-            rotateBone(.leftHand, on: model, restTransforms: restTransforms, yaw: 10, pitch: 14, roll: 14)
-
-            rotateBone(.rightUpperArm, on: model, restTransforms: restTransforms, yaw: 36, pitch: -22, roll: 52)
-            rotateBone(.rightLowerArm, on: model, restTransforms: restTransforms, yaw: 52, pitch: -16)
-            rotateBone(.rightHand, on: model, restTransforms: restTransforms, yaw: -10, pitch: 14, roll: -14)
-
-        case .afkTea:
-            translateBone(.hips, on: model, restTransforms: restTransforms, offset: SIMD3<Float>(0, 0.02, 0))
-            rotateBone(.hips, on: model, restTransforms: restTransforms, yaw: 6, pitch: -5, roll: -2)
-            rotateBone(.spine, on: model, restTransforms: restTransforms, pitch: 4)
-            rotateBone(.chest, on: model, restTransforms: restTransforms, yaw: afkTeaChestYawDeg, pitch: afkTeaChestPitchDeg)
-            rotateBone(.neck, on: model, restTransforms: restTransforms, yaw: -4, pitch: 4)
-
-            // Gentle floating legs tuned to avoid skirt clipping
-            rotateBone(.leftUpperLeg, on: model, restTransforms: restTransforms, yaw: 3, pitch: -19, roll: -3)
-            rotateBone(.leftLowerLeg, on: model, restTransforms: restTransforms, pitch: 40)
-            rotateBone(.leftFoot, on: model, restTransforms: restTransforms, pitch: 18)
-            rotateBone(.rightUpperLeg, on: model, restTransforms: restTransforms, yaw: -3, pitch: -13, roll: 3)
-            rotateBone(.rightLowerLeg, on: model, restTransforms: restTransforms, pitch: 26)
-            rotateBone(.rightFoot, on: model, restTransforms: restTransforms, pitch: 16)
-
-            rotateBone(.leftUpperArm, on: model, restTransforms: restTransforms, yaw: -24, pitch: -16, roll: -50)
-            rotateBone(.leftLowerArm, on: model, restTransforms: restTransforms, yaw: -44, pitch: -14)
-            rotateBone(.rightUpperArm, on: model, restTransforms: restTransforms, yaw: 16, pitch: -8, roll: 58)
-            rotateBone(.rightLowerArm, on: model, restTransforms: restTransforms, yaw: 24, pitch: -8)
-        }
+        applyAuthorOrFallbackPose(to: model, restTransforms: restTransforms, clipTime: 0)
     }
 
     func applyProceduralFrame(
@@ -170,26 +102,24 @@ final class PoseController: MotionSource {
         idleBreathingEnabled: Bool,
         cameraHeadAngles: SIMD3<Float>?
     ) {
+        let localTime = max(0, t - poseStartTime)
+
+        // If the active pose is a time-varying author clip (e.g. 16.67s Alice_AFK_Loop), evaluate it live
+        if let clip = activeAuthorClip(), clip.duration > 0.05 {
+            applyAuthorClip(clip, at: localTime, to: model, restTransforms: restTransforms)
+        }
+
         let breath = sin(t * 1.7)
-
         if idleBreathingEnabled {
-            if let chestIdx = model.humanoid?.getBoneNode(.chest),
-               let base = restTransforms[chestIdx]?.rot {
-                let pitchDeg: Float = (poseMode == .afkBook) ? afkBookChestPitchDeg : ((poseMode == .afkTea) ? afkTeaChestPitchDeg : 0.0)
-                let yawDeg: Float = (poseMode == .afkBook) ? afkBookChestYawDeg : ((poseMode == .afkTea) ? afkTeaChestYawDeg : 0.0)
-                let pitch = simd_quatf(angle: pitchDeg * .pi / 180.0 + breath * 0.014, axis: SIMD3<Float>(1, 0, 0))
-                let yaw = simd_quatf(angle: yawDeg * .pi / 180.0, axis: SIMD3<Float>(0, 1, 0))
-                model.nodes[chestIdx].rotation = yaw * pitch * base
-                model.nodes[chestIdx].updateLocalMatrix()
-            }
-
-            if poseMode == .afkBook || poseMode == .afkTea {
-                if let hipsIdx = model.humanoid?.getBoneNode(.hips),
-                   let rest = restTransforms[hipsIdx] {
-                    let baseHover: Float = (poseMode == .afkBook) ? 0.04 : 0.02
-                    model.nodes[hipsIdx].translation = rest.pos + SIMD3<Float>(0, baseHover + sin(t * 1.35) * 0.018, 0)
-                    model.nodes[hipsIdx].updateLocalMatrix()
+            // Add subtle breathing modulation on top of the current chest pose without overwriting it
+            if let chestIdx = model.humanoid?.getBoneNode(.chest), chestIdx < model.nodes.count {
+                if activeAuthorClip()?.duration ?? 0 <= 0.05 {
+                    // Static clip: recompute base chest rotation first so breathing doesn't accumulate
+                    applyAuthorOrFallbackPose(to: model, restTransforms: restTransforms, clipTime: 0)
                 }
+                let breathQ = simd_quatf(angle: breath * 0.012, axis: SIMD3<Float>(1, 0, 0))
+                model.nodes[chestIdx].rotation = model.nodes[chestIdx].rotation * breathQ
+                model.nodes[chestIdx].updateLocalMatrix()
             }
         }
 
@@ -198,28 +128,28 @@ final class PoseController: MotionSource {
             let pitch = headAngles.y
             let roll = headAngles.z
             if let neckIdx = model.humanoid?.getBoneNode(.neck), let base = restTransforms[neckIdx]?.rot {
-                let qYaw = simd_quatf(angle: yaw * 0.35, axis: SIMD3<Float>(0, 1, 0))
-                let qPitch = simd_quatf(angle: pitch * 0.35, axis: SIMD3<Float>(1, 0, 0))
-                let qRoll = simd_quatf(angle: roll * 0.35, axis: SIMD3<Float>(0, 0, 1))
-                model.nodes[neckIdx].rotation = base * qYaw * qPitch * qRoll
+                let q = simd_quatf(angle: yaw * 0.35, axis: SIMD3<Float>(0, 1, 0))
+                    * simd_quatf(angle: pitch * 0.35, axis: SIMD3<Float>(1, 0, 0))
+                    * simd_quatf(angle: roll * 0.35, axis: SIMD3<Float>(0, 0, 1))
+                model.nodes[neckIdx].rotation = base * q
                 model.nodes[neckIdx].updateLocalMatrix()
             }
             if let headIdx = model.humanoid?.getBoneNode(.head), let base = restTransforms[headIdx]?.rot {
-                let qYaw = simd_quatf(angle: yaw * 0.65, axis: SIMD3<Float>(0, 1, 0))
-                let qPitch = simd_quatf(angle: pitch * 0.65, axis: SIMD3<Float>(1, 0, 0))
-                let qRoll = simd_quatf(angle: roll * 0.65, axis: SIMD3<Float>(0, 0, 1))
-                model.nodes[headIdx].rotation = base * qYaw * qPitch * qRoll
+                let q = simd_quatf(angle: yaw * 0.65, axis: SIMD3<Float>(0, 1, 0))
+                    * simd_quatf(angle: pitch * 0.65, axis: SIMD3<Float>(1, 0, 0))
+                    * simd_quatf(angle: roll * 0.65, axis: SIMD3<Float>(0, 0, 1))
+                model.nodes[headIdx].rotation = base * q
                 model.nodes[headIdx].updateLocalMatrix()
             }
             return
         }
 
-        if poseMode != .afkBook && idleBreathingEnabled {
+        if poseMode != .afkBook && poseMode != .afkTea && idleBreathingEnabled {
             let sway = sin(t * 0.75)
-            if let headIdx = model.humanoid?.getBoneNode(.head), let base = restTransforms[headIdx]?.rot {
-                let roll = simd_quatf(angle: sway * 0.018, axis: SIMD3<Float>(0, 0, 1))
-                let pitch = simd_quatf(angle: breath * 0.01, axis: SIMD3<Float>(1, 0, 0))
-                model.nodes[headIdx].rotation = base * roll * pitch
+            if let headIdx = model.humanoid?.getBoneNode(.head), headIdx < model.nodes.count {
+                let swayQ = simd_quatf(angle: sway * 0.016, axis: SIMD3<Float>(0, 0, 1))
+                    * simd_quatf(angle: breath * 0.008, axis: SIMD3<Float>(1, 0, 0))
+                model.nodes[headIdx].rotation = model.nodes[headIdx].rotation * swayQ
                 model.nodes[headIdx].updateLocalMatrix()
             }
         }
@@ -237,33 +167,99 @@ final class PoseController: MotionSource {
         return t * rot
     }
 
-    // MARK: - Hands & Hair
+    // MARK: - Author Clip Playback vs Generic Fallback
 
-    func applyHandGestures(to model: VRMModel, recipeStore: AssetRecipeStore) {
-        let allFingers: [VRMHumanoidBone] = [
-            .leftThumbMetacarpal, .leftThumbProximal, .leftThumbDistal,
-            .leftIndexProximal, .leftIndexIntermediate, .leftIndexDistal,
-            .leftMiddleProximal, .leftMiddleIntermediate, .leftMiddleDistal,
-            .leftRingProximal, .leftRingIntermediate, .leftRingDistal,
-            .leftLittleProximal, .leftLittleIntermediate, .leftLittleDistal,
-            .rightThumbMetacarpal, .rightThumbProximal, .rightThumbDistal,
-            .rightIndexProximal, .rightIndexIntermediate, .rightIndexDistal,
-            .rightMiddleProximal, .rightMiddleIntermediate, .rightMiddleDistal,
-            .rightRingProximal, .rightRingIntermediate, .rightRingDistal,
-            .rightLittleProximal, .rightLittleIntermediate, .rightLittleDistal
+    private func activeAuthorClip() -> AuthorAnimationClip? {
+        if let exact = animationPlayer.clip(named: poseMode.authorClipID) {
+            return exact
+        }
+        if poseMode == .sit {
+            return animationPlayer.clip(named: "sit")
+        }
+        return nil
+    }
+
+    private func applyAuthorOrFallbackPose(to model: VRMModel, restTransforms: [Int: NodeRestTransform], clipTime: Float) {
+        if let clip = activeAuthorClip() {
+            applyAuthorClip(clip, at: clipTime, to: model, restTransforms: restTransforms)
+            return
+        }
+        applyGenericFallbackPose(to: model, restTransforms: restTransforms)
+    }
+
+    private func applyAuthorClip(
+        _ clip: AuthorAnimationClip,
+        at time: Float,
+        to model: VRMModel,
+        restTransforms: [Int: NodeRestTransform]
+    ) {
+        guard let sampled = animationPlayer.sample(clip: clip, at: time) else { return }
+        let verticalBias: Float = switch poseMode {
+        case .afkBook, .afkTea: 0.14
+        case .prone: 0.34
+        case .crouch: 0.12
+        default: 0.0
+        }
+        let clipHasOnlyNaturalHands = (leftHandGesture == .natural && rightHandGesture == .natural)
+        UnityMuscleRetargeter.apply(
+            pose: sampled,
+            standReferenceRootT: animationPlayer.standReferenceRootT,
+            clipInitialRootZ: animationPlayer.initialRootZ(of: clip),
+            verticalBias: verticalBias,
+            to: model,
+            restTransforms: restTransforms,
+            applyFingers: clipHasOnlyNaturalHands
+        )
+    }
+
+    private func applyGenericFallbackPose(to model: VRMModel, restTransforms: [Int: NodeRestTransform]) {
+        let bodyBones: [VRMHumanoidBone] = [
+            .hips, .spine, .chest, .upperChest, .neck, .head,
+            .leftShoulder, .leftUpperArm, .leftLowerArm, .leftHand,
+            .rightShoulder, .rightUpperArm, .rightLowerArm, .rightHand,
+            .leftUpperLeg, .leftLowerLeg, .leftFoot, .leftToes,
+            .rightUpperLeg, .rightLowerLeg, .rightFoot, .rightToes
         ]
-        resetHumanoidBones(allFingers, on: model, restTransforms: restNodeTransforms)
+        resetHumanoidBones(bodyBones, on: model, restTransforms: restTransforms)
+        rotateBone(.leftUpperArm, on: model, restTransforms: restTransforms, roll: -64)
+        rotateBone(.rightUpperArm, on: model, restTransforms: restTransforms, roll: 64)
+        rotateBone(.leftLowerArm, on: model, restTransforms: restTransforms, yaw: -14)
+        rotateBone(.rightLowerArm, on: model, restTransforms: restTransforms, yaw: 14)
+    }
 
-        for (bone, q) in recipeStore.fingerRotations(for: leftHandGesture, isLeft: true) {
-            if let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restNodeTransforms[idx] {
-                model.nodes[idx].rotation = rest.rot * q
-                model.nodes[idx].updateLocalMatrix()
+    // MARK: - Hand Overrides & Hair
+
+    func applyHandGestureOverrides(to model: VRMModel, recipeStore: AssetRecipeStore) {
+        if leftHandGesture != .natural {
+            let leftFingers: [VRMHumanoidBone] = [
+                .leftThumbMetacarpal, .leftThumbProximal, .leftThumbDistal,
+                .leftIndexProximal, .leftIndexIntermediate, .leftIndexDistal,
+                .leftMiddleProximal, .leftMiddleIntermediate, .leftMiddleDistal,
+                .leftRingProximal, .leftRingIntermediate, .leftRingDistal,
+                .leftLittleProximal, .leftLittleIntermediate, .leftLittleDistal,
+            ]
+            resetHumanoidBones(leftFingers, on: model, restTransforms: restNodeTransforms)
+            for (bone, q) in recipeStore.fingerRotations(for: leftHandGesture, isLeft: true) {
+                if let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restNodeTransforms[idx] {
+                    model.nodes[idx].rotation = rest.rot * q
+                    model.nodes[idx].updateLocalMatrix()
+                }
             }
         }
-        for (bone, q) in recipeStore.fingerRotations(for: rightHandGesture, isLeft: false) {
-            if let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restNodeTransforms[idx] {
-                model.nodes[idx].rotation = rest.rot * q
-                model.nodes[idx].updateLocalMatrix()
+        if rightHandGesture != .natural {
+            let rightFingers: [VRMHumanoidBone] = [
+                .rightThumbMetacarpal, .rightThumbProximal, .rightThumbDistal,
+                .rightIndexProximal, .rightIndexIntermediate, .rightIndexDistal,
+                .rightMiddleProximal, .rightMiddleIntermediate, .rightMiddleDistal,
+                .rightRingProximal, .rightRingIntermediate, .rightRingDistal,
+                .rightLittleProximal, .rightLittleIntermediate, .rightLittleDistal,
+            ]
+            resetHumanoidBones(rightFingers, on: model, restTransforms: restNodeTransforms)
+            for (bone, q) in recipeStore.fingerRotations(for: rightHandGesture, isLeft: false) {
+                if let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restNodeTransforms[idx] {
+                    model.nodes[idx].rotation = rest.rot * q
+                    model.nodes[idx].updateLocalMatrix()
+                }
             }
         }
     }
@@ -275,7 +271,6 @@ final class PoseController: MotionSource {
                 model.nodes[idx].updateLocalMatrix()
             }
         }
-
         guard let adjustments = profile.hairStyles[style.rawValue] else { return }
         for adj in adjustments {
             if let idx = hairNodeIndices[adj.nodeName], let rest = restNodeTransforms[idx] {
@@ -287,15 +282,9 @@ final class PoseController: MotionSource {
 
     // MARK: - Helpers
 
-    private func resetHumanoidBones(
-        _ bones: [VRMHumanoidBone],
-        on model: VRMModel,
-        restTransforms: [Int: NodeRestTransform]
-    ) {
+    private func resetHumanoidBones(_ bones: [VRMHumanoidBone], on model: VRMModel, restTransforms: [Int: NodeRestTransform]) {
         for bone in bones {
-            if let idx = model.humanoid?.getBoneNode(bone),
-               idx < model.nodes.count,
-               let rest = restTransforms[idx] {
+            if let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restTransforms[idx] {
                 model.nodes[idx].translation = rest.pos
                 model.nodes[idx].rotation = rest.rot
                 model.nodes[idx].scale = rest.scale
@@ -312,26 +301,11 @@ final class PoseController: MotionSource {
         pitch: Float = 0,
         roll: Float = 0
     ) {
-        guard let idx = model.humanoid?.getBoneNode(bone),
-              idx < model.nodes.count,
-              let rest = restTransforms[idx] else { return }
-        let qY = simd_quatf(angle: yaw * .pi / 180.0, axis: SIMD3<Float>(0, 1, 0))
-        let qX = simd_quatf(angle: pitch * .pi / 180.0, axis: SIMD3<Float>(1, 0, 0))
-        let qZ = simd_quatf(angle: roll * .pi / 180.0, axis: SIMD3<Float>(0, 0, 1))
-        model.nodes[idx].rotation = qY * qX * qZ * rest.rot
-        model.nodes[idx].updateLocalMatrix()
-    }
-
-    private func translateBone(
-        _ bone: VRMHumanoidBone,
-        on model: VRMModel,
-        restTransforms: [Int: NodeRestTransform],
-        offset: SIMD3<Float>
-    ) {
-        guard let idx = model.humanoid?.getBoneNode(bone),
-              idx < model.nodes.count,
-              let rest = restTransforms[idx] else { return }
-        model.nodes[idx].translation = rest.pos + offset
+        guard let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restTransforms[idx] else { return }
+        let q = simd_quatf(angle: yaw * .pi / 180.0, axis: SIMD3<Float>(0, 1, 0))
+            * simd_quatf(angle: pitch * .pi / 180.0, axis: SIMD3<Float>(1, 0, 0))
+            * simd_quatf(angle: roll * .pi / 180.0, axis: SIMD3<Float>(0, 0, 1))
+        model.nodes[idx].rotation = q * rest.rot
         model.nodes[idx].updateLocalMatrix()
     }
 }

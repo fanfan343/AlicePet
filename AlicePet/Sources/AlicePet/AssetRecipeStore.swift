@@ -42,15 +42,29 @@ struct PoseRecipe: Codable {
 enum PetPoseMode: String, CaseIterable {
     case stand = "stand"
     case sit = "sit"
+    case crouch = "crouch"
+    case prone = "prone"
     case afkBook = "afk_book"
     case afkTea = "afk_tea"
 
     var displayTitle: String {
         switch self {
-        case .stand: return "自然站立 (Stand)"
-        case .sit: return "坐姿待机 (Sit)"
-        case .afkBook: return "看书待机 (AFK 阅读)"
-        case .afkTea: return "下午茶 (AFK 茶会)"
+        case .stand: return "原版站立 (Stand)"
+        case .sit: return "原版坐姿 (Sit)"
+        case .crouch: return "原版蹲姿 (Crouch)"
+        case .prone: return "原版趴卧 (Prone)"
+        case .afkBook: return "原版 AFK 浮空阅读 (Book + Tea)"
+        case .afkTea: return "原版 AFK 茶会 (Tea Set)"
+        }
+    }
+
+    var authorClipID: String {
+        switch self {
+        case .stand: return "stand"
+        case .sit: return "sit_action"
+        case .crouch: return "crouch"
+        case .prone: return "prone"
+        case .afkBook, .afkTea: return "afk_loop"
         }
     }
 }
