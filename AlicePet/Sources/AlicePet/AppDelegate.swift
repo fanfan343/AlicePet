@@ -172,7 +172,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusBarTitle() {
-        if controller.localMotionActive {
+        if controller.localAudioFaceActive {
+            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 🗣️" : "AlicePet · 🗣️(推理中)"
+        } else if controller.localMotionActive {
             statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 🎭" : "AlicePet · 🎭(启动中)"
         } else if controller.vmcActive {
             statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 📡" : "AlicePet · 📡(等待)"
@@ -528,6 +530,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openItem.target = self
         menu.addItem(openItem)
 
+        // Experimental / Lab Features Submenu (tests live here until promoted to main menu)
+        let labMenu = NSMenu()
+        let audioTestTitle = controller.localAudioFaceActive
+            ? "停止音频对口型测试 (\(controller.localAudioFaceService.activeAudioName ?? "播放中"))"
+            : "播放 10s VTuber 语音对口型测试 (LAM 52通道)"
+        let audioTestItem = NSMenuItem(title: audioTestTitle, action: #selector(toggleLabAudioFaceTest), keyEquivalent: "")
+        audioTestItem.target = self
+        audioTestItem.state = controller.localAudioFaceActive ? .on : .off
+        labMenu.addItem(audioTestItem)
+
+        let customAudioItem = NSMenuItem(title: "选择任意音频文件对口型测试…", action: #selector(pickCustomAudioForLabTest), keyEquivalent: "")
+        customAudioItem.target = self
+        labMenu.addItem(customAudioItem)
+
+        let headMotionItem = NSMenuItem(title: "说话时附带轻微点头微动作", action: #selector(toggleLabAudioHeadMotion), keyEquivalent: "")
+        headMotionItem.target = self
+        headMotionItem.state = controller.localAudioFaceService.headMotionEnabled ? .on : .off
+        labMenu.addItem(headMotionItem)
+
+        labMenu.addItem(.separator())
+        let labInfoItem = NSMenuItem(title: "引擎：LAM_Audio2Expression (INT8 ONNX · 52 通道)", action: nil, keyEquivalent: "")
+        labInfoItem.isEnabled = false
+        labMenu.addItem(labInfoItem)
+
+        let labRootTitle = controller.localAudioFaceActive ? "测试功能 (Lab · 运行中)" : "测试功能 (Lab)"
+        let labRoot = NSMenuItem(title: labRootTitle, action: nil, keyEquivalent: "")
+        labRoot.submenu = labMenu
+        menu.addItem(labRoot)
+
         let logItem = NSMenuItem(title: "打开日志文件夹", action: #selector(openLogFolder), keyEquivalent: "l")
         logItem.target = self
         menu.addItem(logItem)
@@ -640,6 +671,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openLogFolder() {
         NSWorkspace.shared.activateFileViewerSelecting([AppLogger.shared.logFileURL])
+    }
+
+    @objc private func toggleLabAudioFaceTest() {
+        if controller.localAudioFaceActive {
+            controller.stopAudioFaceTest()
+        } else {
+            _ = controller.startAudioFaceTest(audioURL: nil, port: preferredVMCPort)
+        }
+        updateStatusBarTitle()
+        refreshMenus()
+    }
+
+    @objc private func pickCustomAudioForLabTest() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio, .wav, .mpeg4Audio, .mp3]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        if let dir = LocalAudioFaceService.resolveServiceDirectory() {
+            panel.directoryURL = dir.appendingPathComponent("samples")
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            _ = controller.startAudioFaceTest(audioURL: url, port: preferredVMCPort, maxSeconds: 30.0)
+            updateStatusBarTitle()
+            refreshMenus()
+        }
+    }
+
+    @objc private func toggleLabAudioHeadMotion() {
+        controller.localAudioFaceService.headMotionEnabled.toggle()
+        refreshMenus()
     }
 
     @objc private func selectPoseMode(_ sender: NSMenuItem) {

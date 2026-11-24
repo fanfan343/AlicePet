@@ -25,6 +25,8 @@ services/**/*.safetensors
 services/**/*.gguf
 services/**/*.bin
 services/**/*.onnx
+services/**/*.onnx.data
+services/**/*.m4a
 services/**/*.pt
 services/**/*.ckpt
 services/**/*.task

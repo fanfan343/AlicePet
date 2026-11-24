@@ -132,6 +132,7 @@ final class LocalMotionService {
 
         let outPipe = Pipe()
         let errPipe = Pipe()
+        proc.standardInput = FileHandle.nullDevice
         proc.standardOutput = outPipe
         proc.standardError = errPipe
 
