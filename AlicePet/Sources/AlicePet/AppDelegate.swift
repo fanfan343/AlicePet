@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isClickThrough: Bool = false
     private var isAlwaysOnTop: Bool = true
     private let autoConnectIPhoneKey = "autoConnectIPhoneCamera"
+    private let upperBodyTrackingKey = "cameraUpperBodyTracking"
     private let lightingPresetKey = "mtoonLightingPreset"
     private let outlineStyleKey = "mtoonOutlineStyle"
     nonisolated static let lastModelPathKey = "lastOpenedVRMModelPath"
@@ -42,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             controller = try PetController(sampleCount: 4)
+            if UserDefaults.standard.object(forKey: upperBodyTrackingKey) != nil {
+                controller.cameraTracker.upperBodyTrackingEnabled = UserDefaults.standard.bool(forKey: upperBodyTrackingKey)
+            }
             if let savedLight = UserDefaults.standard.string(forKey: lightingPresetKey),
                let preset = LightingPreset(rawValue: savedLight) {
                 controller.setLightingPreset(preset)
@@ -193,10 +197,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoIPhoneItem.state = autoConnectIPhoneCamera ? .on : .off
         camMenu.addItem(autoIPhoneItem)
 
+        let upperBodyItem = NSMenuItem(title: "联动上半身与双臂 (3D 骨架)", action: #selector(toggleUpperBodyTracking), keyEquivalent: "")
+        upperBodyItem.target = self
+        upperBodyItem.state = controller.cameraTracker.upperBodyTrackingEnabled ? .on : .off
+        camMenu.addItem(upperBodyItem)
+
         let mirrorItem = NSMenuItem(title: "镜像左右表情 (Mirror)", action: #selector(toggleCameraMirror), keyEquivalent: "")
         mirrorItem.target = self
         mirrorItem.state = controller.cameraTracker.mirrorMode ? .on : .off
         camMenu.addItem(mirrorItem)
+
+        let calibrateItem = NSMenuItem(title: "校准中性表情与坐姿", action: #selector(calibrateCameraNeutral), keyEquivalent: "")
+        calibrateItem.target = self
+        calibrateItem.isEnabled = controller.cameraTrackingActive
+        camMenu.addItem(calibrateItem)
 
         let refreshCamItem = NSMenuItem(title: "刷新摄像头列表", action: #selector(refreshCameraList), keyEquivalent: "")
         refreshCamItem.target = self
@@ -441,6 +455,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.stopCameraCapture()
         statusItem.button?.title = "AlicePet"
         refreshMenus()
+    }
+
+    @objc private func toggleUpperBodyTracking() {
+        controller.cameraTracker.upperBodyTrackingEnabled.toggle()
+        let enabled = controller.cameraTracker.upperBodyTrackingEnabled
+        UserDefaults.standard.set(enabled, forKey: upperBodyTrackingKey)
+        if !enabled {
+            controller.bodySolver.reset()
+        }
+        AppLogger.shared.info("Camera", "upperBodyTrackingEnabled=\(enabled)")
+        refreshMenus()
+    }
+
+    @objc private func calibrateCameraNeutral() {
+        controller.calibrateCameraNeutral()
     }
 
     @objc private func toggleCameraMirror() {

@@ -23,10 +23,11 @@
 - [ ] 支持加载播放标准 `.vrma` 动画文件与姿态间平滑过渡（Crossfade）
 - [ ] 在 `services/motion/` 中以独立本地子服务方式接入 **Kimodo / ARDY** 实时动作生成与骨架重定向
 
-## Stage 4：面捕精度进阶
-- [ ] 抗歪头旋转不变的眼睛开合比（EAR）计算
-- [ ] 中性表情一键校准与双目平均瞳孔视线追踪
-- [ ] 可选支持外部 VMC / ARKit 52 通道实时输入
+## Stage 4：面捕与上半身捕捉进阶
+- [x] 抗歪头旋转不变的眼睛开合比（EAR）计算
+- [x] 中性表情与坐姿一键校准、双目平均瞳孔视线追踪、皱眉/脸颊联动
+- [x] 原生 Apple Vision 3D 上半身骨架追踪（`VNDetectHumanBodyPose3DRequest` + `BodyTrackingSolver` 1€ 滤波，驱动脊柱/胸口/双臂联动）
+- [ ] 可选支持 MediaPipe 52 通道精捕子服务（`services/`）或 iPhone VMC/OSC 52 通道实时输入
 
 ## Stage 5：AI 大脑与语音口型（LLM + TTS）
 - [ ] 在 `services/llm/` 中接入可切换的在线 / 本地 LLM 对话服务

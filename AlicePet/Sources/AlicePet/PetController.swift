@@ -26,6 +26,7 @@ final class PetController: NSObject, MTKViewDelegate {
     let recipeStore = AssetRecipeStore()
     let poseController = PoseController()
     let expressionMixer = ExpressionMixer()
+    let bodySolver = BodyTrackingSolver()
     let cameraTracker = CameraFaceTracker()
 
     private(set) var model: VRMModel?
@@ -105,6 +106,10 @@ final class PetController: NSObject, MTKViewDelegate {
         cameraTracker.onFrame = { [weak self] frame in
             guard let self, self.cameraTrackingActive else { return }
             self.expressionMixer.applyCameraFrame(frame, on: self.renderer)
+        }
+        cameraTracker.onBodyFrame = { [weak self] bodyFrame in
+            guard let self, self.cameraTrackingActive, self.cameraTracker.upperBodyTrackingEnabled else { return }
+            self.bodySolver.update(with: bodyFrame, timestamp: CACurrentMediaTime())
         }
         cameraTracker.onTrackingStateChanged = { [weak self] detected in
             self?.onCameraFaceDetectedChanged?(detected)
@@ -315,6 +320,7 @@ final class PetController: NSObject, MTKViewDelegate {
     func startCameraCapture(deviceID: String) {
         AppLogger.shared.info("Camera", "Requesting camera capture start: \(deviceID)")
         expressionMixer.prepareForCameraStart(on: renderer)
+        bodySolver.reset()
         activeCameraID = deviceID
         cameraTracker.start(deviceID: deviceID)
     }
@@ -324,9 +330,15 @@ final class PetController: NSObject, MTKViewDelegate {
             AppLogger.shared.info("Camera", "Stopping camera capture")
         }
         cameraTracker.stop()
+        bodySolver.reset()
         activeCameraID = nil
         expressionMixer.resetAfterCameraStop(on: renderer)
         applyAllBodyAndOutfitState(settlePhysics: false)
+    }
+
+    func calibrateCameraNeutral() {
+        cameraTracker.calibrateNeutral()
+        bodySolver.reset()
     }
 
     func setPresetMood(_ preset: VRMExpressionPreset?) {
@@ -371,9 +383,12 @@ final class PetController: NSObject, MTKViewDelegate {
                 to: model,
                 restTransforms: poseController.restNodeTransforms,
                 elapsed: elapsed,
-                idleBreathingEnabled: idleBreathingEnabled,
+                idleBreathingEnabled: idleBreathingEnabled && !(cameraTrackingActive && cameraTracker.upperBodyTrackingEnabled && bodySolver.hasActiveBody),
                 cameraHeadAngles: cameraTrackingActive ? expressionMixer.smoothedHeadAngles : nil
             )
+            if cameraTrackingActive && cameraTracker.upperBodyTrackingEnabled {
+                bodySolver.apply(to: model, restTransforms: poseController.restNodeTransforms, now: frameStart)
+            }
             expressionMixer.updateLookAt(
                 on: renderer,
                 poseMode: poseMode,
