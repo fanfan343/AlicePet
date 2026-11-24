@@ -24,10 +24,9 @@
 - [ ] 在 `services/motion/` 中以独立本地子服务方式接入 **Kimodo / ARDY** 实时动作生成与骨架重定向
 
 ## Stage 4：面捕与上半身捕捉进阶
-- [x] 抗歪头旋转不变的眼睛开合比（EAR）计算
-- [x] 中性表情与坐姿一键校准、双目平均瞳孔视线追踪、皱眉/脸颊联动
-- [x] 原生 Apple Vision 上半身骨架追踪（20Hz 2D 关键点 + `BodyTrackingSolver` 1€ 滤波，驱动脊柱/胸口/双臂联动）
-- [x] VMC / OSC UDP 实时接收器（默认端口 `39539` / `39540`，支持 iPhone 前置 TrueDepth 52 通道 ARKit PerfectSync + 上半身/全身骨骼，兼容 Waidayo / iFacialMocap / XR Animator）
+- [x] VMC / OSC UDP 统一动捕接收器（默认端口 `39539` / `39540`，支持 52 通道 ARKit PerfectSync + 全身/十指骨骼，兼容外部发包端与本机服务）
+- [x] 本地无界面 MediaPipe 精捕子服务（`services/motion/`：直接复用 `face_landmarker` + `pose_landmarker` + `hand_landmarker` 3 个 `.task` 模型，输出 52 通道表情 + 上半身 + 十指，菜单栏一键启停、关闭即终止进程 100% 释放摄像头）
+- [x] 废弃旧版 Apple Vision 启发式摄像头捕捉与抖动体捕，统一收口到 VMC 管线与简洁菜单栏
 
 ## Stage 5：AI 大脑与语音口型（LLM + TTS）
 - [ ] 在 `services/llm/` 中接入可切换的在线 / 本地 LLM 对话服务

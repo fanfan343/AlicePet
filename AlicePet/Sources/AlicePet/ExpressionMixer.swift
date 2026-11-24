@@ -16,14 +16,6 @@ final class ExpressionMixer {
     var eyeTrackingEnabled: Bool = true
 
     private var blinkTimer: Timer?
-    private var yawFilter = OneEuroFilterScalar(minCutoff: 0.55, beta: 0.04, dCutoff: 1.0)
-    private var pitchFilter = OneEuroFilterScalar(minCutoff: 0.55, beta: 0.04, dCutoff: 1.0)
-    private var rollFilter = OneEuroFilterScalar(minCutoff: 0.55, beta: 0.04, dCutoff: 1.0)
-    private var gazeXFilter = OneEuroFilterScalar(minCutoff: 1.1, beta: 0.06, dCutoff: 1.0)
-    private var gazeYFilter = OneEuroFilterScalar(minCutoff: 1.1, beta: 0.06, dCutoff: 1.0)
-
-    private(set) var smoothedHeadAngles: SIMD3<Float> = .zero
-    private(set) var latestCameraGaze: SIMD2<Float> = .zero
 
     init() {
         var smoothing = SmoothingConfig.default
@@ -121,42 +113,15 @@ final class ExpressionMixer {
         }
     }
 
-    // MARK: - Camera ARKit Tracking (Layer 2)
+    // MARK: - VMC / ARKit Tracking (Layer 2)
 
-    func prepareForCameraStart(on renderer: VRMRenderer) {
+    func prepareForTrackingStart(on renderer: VRMRenderer) {
         clearCustomExpression(on: renderer)
         activePresetMood = nil
         renderer.expressionController?.setMood(.neutral, intensity: 0.0)
-        yawFilter.reset()
-        pitchFilter.reset()
-        rollFilter.reset()
-        gazeXFilter.reset()
-        gazeYFilter.reset()
-        smoothedHeadAngles = .zero
-        latestCameraGaze = .zero
     }
 
-    func applyCameraFrame(_ frame: TrackedFaceFrame, on renderer: VRMRenderer) {
-        guard let exprCtrl = renderer.expressionController else { return }
-        faceDriver.update(blendShapes: frame.blendShapes, controller: exprCtrl, maxAge: 0.5)
-        let now = CACurrentMediaTime()
-        let rawY = yawFilter.filter(frame.headYaw, timestamp: now)
-        let rawP = pitchFilter.filter(frame.headPitch, timestamp: now)
-        let rawR = rollFilter.filter(frame.headRoll, timestamp: now)
-        smoothedHeadAngles = SIMD3<Float>(
-            abs(rawY) < 0.012 ? 0 : rawY,
-            abs(rawP) < 0.012 ? 0 : rawP,
-            abs(rawR) < 0.012 ? 0 : rawR
-        )
-        latestCameraGaze = SIMD2<Float>(
-            gazeXFilter.filter(frame.gazeOffset.x, timestamp: now),
-            gazeYFilter.filter(frame.gazeOffset.y, timestamp: now)
-        )
-    }
-
-    func resetAfterCameraStop(on renderer: VRMRenderer) {
-        smoothedHeadAngles = .zero
-        latestCameraGaze = .zero
+    func resetAfterTrackingStop(on renderer: VRMRenderer) {
         if let exprCtrl = renderer.expressionController {
             let zeros = Dictionary(uniqueKeysWithValues: ARKitFaceBlendShapes.allKeys.map { ($0, Float(0)) })
             faceDriver.update(
@@ -175,15 +140,10 @@ final class ExpressionMixer {
     func updateLookAt(
         on renderer: VRMRenderer,
         poseMode: PetPoseMode,
-        cameraTrackingActive: Bool,
         window: NSWindow?
     ) {
         guard let lookAt = renderer.lookAtController else { return }
 
-        if cameraTrackingActive {
-            lookAt.target = .headLocalPoint(SIMD3<Float>(latestCameraGaze.x * 0.55, latestCameraGaze.y * 0.35, 1.5))
-            return
-        }
         if poseMode == .afkBook {
             lookAt.target = .headLocalPoint(SIMD3<Float>(0, -0.35, 1.0))
             return

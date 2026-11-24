@@ -17,8 +17,7 @@ protocol MotionSource {
         to model: VRMModel,
         restTransforms: [Int: NodeRestTransform],
         elapsed: Float,
-        idleBreathingEnabled: Bool,
-        cameraHeadAngles: SIMD3<Float>?
+        idleBreathingEnabled: Bool
     )
 }
 
@@ -103,8 +102,7 @@ final class PoseController: MotionSource {
         to model: VRMModel,
         restTransforms: [Int: NodeRestTransform],
         elapsed t: Float,
-        idleBreathingEnabled: Bool,
-        cameraHeadAngles: SIMD3<Float>?
+        idleBreathingEnabled: Bool
     ) {
         let localTime = max(0, t - poseStartTime)
 
@@ -135,27 +133,6 @@ final class PoseController: MotionSource {
                 model.nodes[chestIdx].rotation = model.nodes[chestIdx].rotation * breathQ
                 model.nodes[chestIdx].updateLocalMatrix()
             }
-        }
-
-        if let headAngles = cameraHeadAngles {
-            let yaw = headAngles.x
-            let pitch = headAngles.y
-            let roll = headAngles.z
-            if let neckIdx = model.humanoid?.getBoneNode(.neck), let base = restTransforms[neckIdx]?.rot {
-                let q = simd_quatf(angle: yaw * 0.35, axis: SIMD3<Float>(0, 1, 0))
-                    * simd_quatf(angle: pitch * 0.35, axis: SIMD3<Float>(1, 0, 0))
-                    * simd_quatf(angle: roll * 0.35, axis: SIMD3<Float>(0, 0, 1))
-                model.nodes[neckIdx].rotation = base * q
-                model.nodes[neckIdx].updateLocalMatrix()
-            }
-            if let headIdx = model.humanoid?.getBoneNode(.head), let base = restTransforms[headIdx]?.rot {
-                let q = simd_quatf(angle: yaw * 0.65, axis: SIMD3<Float>(0, 1, 0))
-                    * simd_quatf(angle: pitch * 0.65, axis: SIMD3<Float>(1, 0, 0))
-                    * simd_quatf(angle: roll * 0.65, axis: SIMD3<Float>(0, 0, 1))
-                model.nodes[headIdx].rotation = base * q
-                model.nodes[headIdx].updateLocalMatrix()
-            }
-            return
         }
 
         if poseMode != .afkBook && poseMode != .afkTea && idleBreathingEnabled {

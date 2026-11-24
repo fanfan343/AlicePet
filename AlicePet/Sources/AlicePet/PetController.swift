@@ -26,9 +26,8 @@ final class PetController: NSObject, MTKViewDelegate {
     let recipeStore = AssetRecipeStore()
     let poseController = PoseController()
     let expressionMixer = ExpressionMixer()
-    let bodySolver = BodyTrackingSolver()
-    let cameraTracker = CameraFaceTracker()
     let vmcController = VMCTrackingController()
+    let localMotionService = LocalMotionService()
 
     private(set) var model: VRMModel?
     private(set) var loadedModelURL: URL?
@@ -50,7 +49,7 @@ final class PetController: NSObject, MTKViewDelegate {
         get { expressionMixer.eyeTrackingEnabled }
         set {
             expressionMixer.eyeTrackingEnabled = newValue
-            if !newValue && !cameraTrackingActive {
+            if !newValue && !vmcReceiving {
                 renderer.lookAtController?.target = .forward
             }
         }
@@ -70,13 +69,9 @@ final class PetController: NSObject, MTKViewDelegate {
     private(set) var lightingPreset: LightingPreset = .animeSoftDay
     private(set) var outlineStyle: OutlineStyle = .off
 
-    private(set) var activeCameraID: String?
-    var cameraTrackingActive: Bool { activeCameraID != nil }
     var vmcActive: Bool { vmcController.isListening }
     var vmcReceiving: Bool { vmcController.isReceivingFrames }
-    var onCameraError: ((String) -> Void)?
-    var onCameraDevicesChanged: (() -> Void)?
-    var onCameraFaceDetectedChanged: ((Bool) -> Void)?
+    var localMotionActive: Bool { localMotionService.isRunning }
     var onVMCStatusChanged: (() -> Void)?
     var onVMCError: ((String) -> Void)?
 
@@ -108,28 +103,17 @@ final class PetController: NSObject, MTKViewDelegate {
         applyLightingAndOutline()
         renderer.enableSpringBone = springBoneEnabled
 
-        cameraTracker.onFrame = { [weak self] frame in
-            guard let self, self.cameraTrackingActive else { return }
-            self.expressionMixer.applyCameraFrame(frame, on: self.renderer)
-        }
-        cameraTracker.onBodyFrame = { [weak self] bodyFrame in
-            guard let self, self.cameraTrackingActive, self.cameraTracker.upperBodyTrackingEnabled else { return }
-            self.bodySolver.update(with: bodyFrame, timestamp: CACurrentMediaTime())
-        }
-        cameraTracker.onTrackingStateChanged = { [weak self] detected in
-            self?.onCameraFaceDetectedChanged?(detected)
-        }
-        cameraTracker.onError = { [weak self] msg in
-            self?.stopCameraCapture()
-            self?.onCameraError?(msg)
-        }
-        cameraTracker.onDevicesChanged = { [weak self] in
-            self?.onCameraDevicesChanged?()
-        }
         vmcController.onStatusChanged = { [weak self] in
             self?.onVMCStatusChanged?()
         }
         vmcController.onError = { [weak self] msg in
+            self?.localMotionService.stop()
+            self?.onVMCError?(msg)
+        }
+        localMotionService.onStateChanged = { [weak self] in
+            self?.onVMCStatusChanged?()
+        }
+        localMotionService.onError = { [weak self] msg in
             self?.onVMCError?(msg)
         }
     }
@@ -319,59 +303,50 @@ final class PetController: NSObject, MTKViewDelegate {
         renderer.warmupPhysics(steps: warmupSteps)
     }
 
-    // MARK: - Timers, Camera & Expressions
+    // MARK: - Timers, VMC / Local MediaPipe Tracking & Expressions
 
     func startTimers() {
         expressionMixer.startAutoBlink(
             rendererProvider: { [weak self] in self?.renderer },
-            isCameraActive: { [weak self] in
-                (self?.cameraTrackingActive ?? false) || (self?.vmcReceiving ?? false)
-            }
+            isCameraActive: { [weak self] in self?.vmcReceiving ?? false }
         )
-    }
-
-    func startCameraCapture(deviceID: String) {
-        if vmcActive {
-            stopVMC()
-        }
-        AppLogger.shared.info("Camera", "Requesting camera capture start: \(deviceID)")
-        expressionMixer.prepareForCameraStart(on: renderer)
-        bodySolver.reset()
-        activeCameraID = deviceID
-        cameraTracker.start(deviceID: deviceID)
-    }
-
-    func stopCameraCapture() {
-        if activeCameraID != nil {
-            AppLogger.shared.info("Camera", "Stopping camera capture")
-        }
-        cameraTracker.stop()
-        bodySolver.reset()
-        activeCameraID = nil
-        expressionMixer.resetAfterCameraStop(on: renderer)
-        applyAllBodyAndOutfitState(settlePhysics: false)
     }
 
     @discardableResult
     func startVMC(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
-        if cameraTrackingActive {
-            stopCameraCapture()
-        }
-        expressionMixer.prepareForCameraStart(on: renderer)
+        expressionMixer.prepareForTrackingStart(on: renderer)
         return vmcController.start(port: port)
     }
 
     func stopVMC() {
+        localMotionService.stop()
         let wasActive = vmcActive
         vmcController.stop(renderer: renderer, expressionMixer: expressionMixer)
         if wasActive {
+            expressionMixer.resetAfterTrackingStop(on: renderer)
             applyAllBodyAndOutfitState(settlePhysics: false)
         }
     }
 
-    func calibrateCameraNeutral() {
-        cameraTracker.calibrateNeutral()
-        bodySolver.reset()
+    @discardableResult
+    func startLocalMotionCapture(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
+        if !vmcActive || vmcController.port != port {
+            guard startVMC(port: port) else { return false }
+        }
+        let ok = localMotionService.start(port: vmcController.port)
+        if !ok {
+            stopVMC()
+        }
+        return ok
+    }
+
+    func stopLocalMotionCapture() {
+        stopVMC()
+    }
+
+    func stopAllTrackingSync() {
+        localMotionService.stopSync()
+        vmcController.stop()
     }
 
     func setPresetMood(_ preset: VRMExpressionPreset?) {
@@ -423,26 +398,15 @@ final class PetController: NSObject, MTKViewDelegate {
                     // Handles clean transition when an active VMC stream goes stale
                     vmcController.apply(to: model, renderer: renderer, expressionMixer: expressionMixer)
                 }
-                let trackingBody = cameraTrackingActive && cameraTracker.upperBodyTrackingEnabled && bodySolver.hasActiveBody
-                // Always start from the clean base pose before layering 3D upper-body tracking so SLERP never feeds back
-                if trackingBody {
-                    poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
-                    poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
-                }
                 poseController.applyProceduralFrame(
                     to: model,
                     restTransforms: poseController.restNodeTransforms,
                     elapsed: elapsed,
-                    idleBreathingEnabled: idleBreathingEnabled && !trackingBody,
-                    cameraHeadAngles: cameraTrackingActive ? expressionMixer.smoothedHeadAngles : nil
+                    idleBreathingEnabled: idleBreathingEnabled
                 )
-                if trackingBody {
-                    bodySolver.apply(to: model, restTransforms: poseController.restNodeTransforms, now: frameStart)
-                }
                 expressionMixer.updateLookAt(
                     on: renderer,
                     poseMode: poseMode,
-                    cameraTrackingActive: cameraTrackingActive,
                     window: view.window
                 )
             }
@@ -491,13 +455,13 @@ final class PetController: NSObject, MTKViewDelegate {
         let fps = Double(perfFrameCount) / window
         let avgEncodeMs = perfEncodeMsSum / Double(perfFrameCount)
         let memMB = Self.currentMemoryFootprintMB()
-        let camFlag = cameraTrackingActive ? "on" : "off"
+        let motionFlag = localMotionActive ? "local" : "off"
         let vmcFlag = vmcReceiving ? "rx" : (vmcActive ? "listen" : "off")
         AppLogger.shared.info(
             "Perf",
             String(
-                format: "fps=%.1f avgEncodeMs=%.2f memMB=%.1f pose=%@ props=%@ cam=%@ vmc=%@",
-                fps, avgEncodeMs, memMB, poseMode.rawValue, propRenderer.activePropMode.rawValue, camFlag, vmcFlag
+                format: "fps=%.1f avgEncodeMs=%.2f memMB=%.1f pose=%@ props=%@ motion=%@ vmc=%@",
+                fps, avgEncodeMs, memMB, poseMode.rawValue, propRenderer.activePropMode.rawValue, motionFlag, vmcFlag
             )
         )
         perfWindowStart = now

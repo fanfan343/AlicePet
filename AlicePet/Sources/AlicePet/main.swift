@@ -30,7 +30,8 @@ func resolveInitialModelURL(isHeadlessSnapshot: Bool) -> URL {
 }
 
 let vmcLoopbackPath = parseArg("--test-vmc-loopback")
-let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil)
+let motionServiceTestPath = parseArg("--test-motion-service")
+let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil) || (motionServiceTestPath != nil)
 let modelURL = resolveInitialModelURL(isHeadlessSnapshot: isSnapshotMode)
 
 func sendLoopbackUDP(_ data: Data, toPort port: UInt16) throws {
@@ -143,6 +144,64 @@ if let loopbackOutputPath = vmcLoopbackPath {
             controller.stopVMC()
         } catch {
             fputs("VMC loopback error: \(error)\n", stderr)
+            exitCode = 1
+        }
+        done = true
+    }
+    while !done {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+    }
+    exit(exitCode)
+}
+
+if let motionOutputPath = motionServiceTestPath {
+    var done = false
+    var exitCode: Int32 = 0
+    Task { @MainActor in
+        do {
+            let controller = try PetController(sampleCount: 1)
+            try await controller.loadModel(from: modelURL, synchronousPhysics: true)
+            controller.camera.apply(preset: .upperBody)
+
+            guard controller.startVMC(port: 0), let boundPort = controller.vmcController.boundPort else {
+                throw NSError(domain: "AlicePet.Motion", code: 20, userInfo: [NSLocalizedDescriptionKey: "Failed to bind VMC port"])
+            }
+            guard let serviceDir = LocalMotionService.resolveServiceDirectory() else {
+                throw NSError(domain: "AlicePet.Motion", code: 21, userInfo: [NSLocalizedDescriptionKey: "services/motion directory not found"])
+            }
+            let proc = Process()
+            proc.executableURL = serviceDir.appendingPathComponent(".venv/bin/python")
+            proc.currentDirectoryURL = serviceDir
+            proc.arguments = ["tracker.py", "--self-test", "--host", "127.0.0.1", "--port", String(boundPort)]
+            var env = ProcessInfo.processInfo.environment
+            env["GLOG_minloglevel"] = "2"
+            env["TF_CPP_MIN_LOG_LEVEL"] = "2"
+            proc.environment = env
+            try proc.run()
+
+            let deadline = Date().addingTimeInterval(15.0)
+            while (controller.vmcController.packetCount == 0 || proc.isRunning) && Date() < deadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0, controller.vmcController.packetCount > 0, let model = controller.model else {
+                throw NSError(domain: "AlicePet.Motion", code: 22, userInfo: [NSLocalizedDescriptionKey: "Motion service self-test failed (status=\(proc.terminationStatus), packets=\(controller.vmcController.packetCount))"])
+            }
+
+            controller.poseController.applyBasePose(to: model, restTransforms: controller.poseController.restNodeTransforms)
+            let applied = controller.vmcController.apply(
+                to: model,
+                renderer: controller.renderer,
+                expressionMixer: controller.expressionMixer
+            )
+            controller.settleSpringBonePhysics(warmupSteps: 16)
+            print("MotionService E2E OK: port=\(boundPort) packets=\(controller.vmcController.packetCount) bones=\(controller.vmcController.receivedBoneCount) blendShapes=\(controller.vmcController.receivedBlendShapeCount) applied=\(applied)")
+
+            try await controller.renderSnapshot(to: URL(fileURLWithPath: motionOutputPath), applyBaseState: false)
+            print("MotionService E2E snapshot saved to \(motionOutputPath)")
+            controller.stopAllTrackingSync()
+        } catch {
+            fputs("MotionService E2E error: \(error)\n", stderr)
             exitCode = 1
         }
         done = true

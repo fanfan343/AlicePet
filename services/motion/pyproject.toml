@@ -1,0 +1,11 @@
+[project]
+name = "alicepet-motion"
+version = "0.1.0"
+description = "Lightweight headless MediaPipe (52 ARKit face + upper body + 10-finger hands) to VMC/OSC sender for AlicePet"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "mediapipe>=0.10.14",
+    "numpy>=1.26.0",
+    "opencv-python-headless>=4.10.0",
+    "python-osc>=1.9.0",
+]

@@ -27,6 +27,8 @@ services/**/*.bin
 services/**/*.onnx
 services/**/*.pt
 services/**/*.ckpt
+services/**/*.task
+services/**/*.tflite
 
 # VRM / glTF model assets (large binaries & third-party licensed assets)
 *.vrm

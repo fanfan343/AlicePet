@@ -12,12 +12,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var isClickThrough: Bool = false
     private var isAlwaysOnTop: Bool = true
-    private let autoConnectIPhoneKey = "autoConnectIPhoneCamera"
-    private let upperBodyTrackingKey = "cameraUpperBodyTracking"
     private let lightingPresetKey = "mtoonLightingPreset"
     private let outlineStyleKey = "mtoonOutlineStyle"
     private let vmcPortKey = "vmcListenPort"
     private let vmcAppliesHipsPositionKey = "vmcAppliesHipsPosition"
+    private let motionBodyKey = "localMotionEnableBody"
+    private let motionHandsKey = "localMotionEnableHands"
+    private let motionMirrorKey = "localMotionMirrorMode"
+    private let motionPoseTierKey = "localMotionPoseTier"
+    private let motionCameraIndexKey = "localMotionCameraIndex"
     nonisolated static let lastModelPathKey = "lastOpenedVRMModelPath"
 
     private var preferredVMCPort: UInt16 {
@@ -30,18 +33,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         set {
             UserDefaults.standard.set(Int(newValue), forKey: vmcPortKey)
-        }
-    }
-
-    private var autoConnectIPhoneCamera: Bool {
-        get {
-            if UserDefaults.standard.object(forKey: autoConnectIPhoneKey) == nil {
-                return false
-            }
-            return UserDefaults.standard.bool(forKey: autoConnectIPhoneKey)
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: autoConnectIPhoneKey)
         }
     }
 
@@ -58,19 +49,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         do {
             controller = try PetController(sampleCount: 4)
-            if UserDefaults.standard.object(forKey: upperBodyTrackingKey) != nil {
-                controller.cameraTracker.upperBodyTrackingEnabled = UserDefaults.standard.bool(forKey: upperBodyTrackingKey)
-            }
-            if let savedLight = UserDefaults.standard.string(forKey: lightingPresetKey),
+            let defaults = UserDefaults.standard
+            if let savedLight = defaults.string(forKey: lightingPresetKey),
                let preset = LightingPreset(rawValue: savedLight) {
                 controller.setLightingPreset(preset)
             }
-            if let savedOutline = UserDefaults.standard.string(forKey: outlineStyleKey),
+            if let savedOutline = defaults.string(forKey: outlineStyleKey),
                let style = OutlineStyle(rawValue: savedOutline) {
                 controller.setOutlineStyle(style)
             }
-            if UserDefaults.standard.object(forKey: vmcAppliesHipsPositionKey) != nil {
-                controller.vmcController.appliesHipsPosition = UserDefaults.standard.bool(forKey: vmcAppliesHipsPositionKey)
+            if defaults.object(forKey: vmcAppliesHipsPositionKey) != nil {
+                controller.vmcController.appliesHipsPosition = defaults.bool(forKey: vmcAppliesHipsPositionKey)
+            }
+            if defaults.object(forKey: motionBodyKey) != nil {
+                controller.localMotionService.enableBody = defaults.bool(forKey: motionBodyKey)
+            }
+            if defaults.object(forKey: motionHandsKey) != nil {
+                controller.localMotionService.enableHands = defaults.bool(forKey: motionHandsKey)
+            }
+            if defaults.object(forKey: motionMirrorKey) != nil {
+                controller.localMotionService.mirrorMode = defaults.bool(forKey: motionMirrorKey)
+            }
+            if let tierRaw = defaults.string(forKey: motionPoseTierKey),
+               let tier = MotionPoseModelTier(rawValue: tierRaw) {
+                controller.localMotionService.poseModel = tier
+            }
+            if defaults.object(forKey: motionCameraIndexKey) != nil {
+                controller.localMotionService.cameraIndex = max(0, defaults.integer(forKey: motionCameraIndexKey))
             }
         } catch {
             AppLogger.shared.error("App", "Failed to initialize Metal/VRMMetalKit: \(error)")
@@ -127,21 +132,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.buildMenu() ?? NSMenu()
         }
 
-        controller.onCameraError = { [weak self] message in
-            self?.refreshMenus()
-            let alert = NSAlert()
-            alert.messageText = "摄像头捕捉提醒"
-            alert.informativeText = message
-            alert.alertStyle = .warning
-            alert.runModal()
-        }
-        controller.onCameraDevicesChanged = { [weak self] in
-            self?.refreshMenus()
-        }
-        controller.onCameraFaceDetectedChanged = { [weak self] detected in
-            guard let self, self.controller.cameraTrackingActive else { return }
-            self.statusItem.button?.title = detected ? "AlicePet · 📹" : "AlicePet · 📹(未见人脸)"
-        }
         controller.onVMCStatusChanged = { [weak self] in
             self?.updateStatusBarTitle()
             self?.refreshMenus()
@@ -150,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateStatusBarTitle()
             self?.refreshMenus()
             let alert = NSAlert()
-            alert.messageText = "VMC / OSC 接收提醒"
+            alert.messageText = "动作与面部捕捉提醒"
             alert.informativeText = message
             alert.alertStyle = .warning
             alert.runModal()
@@ -167,14 +157,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try await controller.loadModel(from: initialModelURL)
                 refreshMenus()
-                let cameras = CameraFaceTracker.availableCameras()
-                AppLogger.shared.info("Camera", "Detected \(cameras.count) camera(s): \(cameras.map(\.name).joined(separator: ", "))")
-                if autoConnectIPhoneCamera, let iphoneCam = cameras.first(where: { $0.isContinuityCamera }) {
-                    AppLogger.shared.info("Camera", "Auto-connecting iPhone Continuity Camera: \(iphoneCam.name)")
-                    controller.startCameraCapture(deviceID: iphoneCam.id)
-                    statusItem.button?.title = "AlicePet · 📹"
-                    refreshMenus()
-                }
+                let cameras = LocalMotionService.availableCameras()
+                AppLogger.shared.info("Motion", "Detected \(cameras.count) camera(s): \(cameras.map(\.name).joined(separator: ", "))")
             } catch {
                 AppLogger.shared.error("Model", "Failed to load VRM model: \(error)")
             }
@@ -188,10 +172,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusBarTitle() {
-        if controller.vmcActive {
+        if controller.localMotionActive {
+            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 🎭" : "AlicePet · 🎭(启动中)"
+        } else if controller.vmcActive {
             statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 📡" : "AlicePet · 📡(等待)"
-        } else if controller.cameraTrackingActive {
-            statusItem.button?.title = "AlicePet · 📹"
         } else {
             statusItem.button?.title = "AlicePet"
         }
@@ -209,86 +193,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(titleItem)
         menu.addItem(.separator())
 
-        // 1. Camera face capture submenu (Mac / iPhone Continuity Camera)
-        let camMenu = NSMenu()
-        let stopCamItem = NSMenuItem(title: "关闭摄像头捕捉", action: #selector(stopCameraCapture), keyEquivalent: "")
-        stopCamItem.target = self
-        stopCamItem.state = controller.cameraTrackingActive ? .off : .on
-        camMenu.addItem(stopCamItem)
-        camMenu.addItem(.separator())
+        // 1. Unified Motion & Face Capture Submenu (Local MediaPipe Service + External VMC/OSC)
+        let captureMenu = NSMenu()
+        let vmcPort = controller.vmcActive ? controller.vmcController.port : preferredVMCPort
 
-        let cameras = CameraFaceTracker.availableCameras()
+        let localToggleTitle = controller.localMotionActive
+            ? "关闭本机 MediaPipe 精捕（立即释放摄像头）"
+            : "开启本机 MediaPipe 精捕（52表情 + 上半身 + 十指）"
+        let localToggleItem = NSMenuItem(title: localToggleTitle, action: #selector(toggleLocalMotionCapture), keyEquivalent: "")
+        localToggleItem.target = self
+        localToggleItem.state = controller.localMotionActive ? .on : .off
+        captureMenu.addItem(localToggleItem)
+
+        let bodyToggle = NSMenuItem(title: "联动上半身与双臂", action: #selector(toggleLocalMotionBody), keyEquivalent: "")
+        bodyToggle.target = self
+        bodyToggle.state = controller.localMotionService.enableBody ? .on : .off
+        captureMenu.addItem(bodyToggle)
+
+        let handsToggle = NSMenuItem(title: "联动双手与十指 (30 关节)", action: #selector(toggleLocalMotionHands), keyEquivalent: "")
+        handsToggle.target = self
+        handsToggle.state = controller.localMotionService.enableHands ? .on : .off
+        captureMenu.addItem(handsToggle)
+
+        let mirrorToggle = NSMenuItem(title: "镜像左右动作与表情 (Mirror)", action: #selector(toggleLocalMotionMirror), keyEquivalent: "")
+        mirrorToggle.target = self
+        mirrorToggle.state = controller.localMotionService.mirrorMode ? .on : .off
+        captureMenu.addItem(mirrorToggle)
+
+        // Camera & Pose model quality nested submenu
+        let deviceMenu = NSMenu()
+        let cameras = LocalMotionService.availableCameras()
         if cameras.isEmpty {
-            let emptyItem = NSMenuItem(title: "未检测到可用摄像头", action: nil, keyEquivalent: "")
+            let emptyItem = NSMenuItem(title: "未检测到摄像头（默认索引 0）", action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
-            camMenu.addItem(emptyItem)
+            deviceMenu.addItem(emptyItem)
         } else {
             for cam in cameras {
-                let item = NSMenuItem(title: cam.displayTitle, action: #selector(selectCameraDevice(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: "[\(cam.index)] \(cam.displayTitle)", action: #selector(selectLocalMotionCamera(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = cam.id
-                item.state = (controller.activeCameraID == cam.id) ? .on : .off
-                camMenu.addItem(item)
+                item.representedObject = cam.index
+                item.state = (controller.localMotionService.cameraIndex == cam.index) ? .on : .off
+                deviceMenu.addItem(item)
             }
         }
+        deviceMenu.addItem(.separator())
+        for tier in MotionPoseModelTier.allCases {
+            let item = NSMenuItem(title: tier.displayTitle, action: #selector(selectLocalMotionPoseTier(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = tier.rawValue
+            item.state = (controller.localMotionService.poseModel == tier) ? .on : .off
+            deviceMenu.addItem(item)
+        }
+        let deviceRoot = NSMenuItem(title: "摄像头与精度设置", action: nil, keyEquivalent: "")
+        deviceRoot.submenu = deviceMenu
+        captureMenu.addItem(deviceRoot)
 
-        camMenu.addItem(.separator())
-        let autoIPhoneItem = NSMenuItem(title: "启动时自动连接 iPhone 相机", action: #selector(toggleAutoConnectIPhone), keyEquivalent: "")
-        autoIPhoneItem.target = self
-        autoIPhoneItem.state = autoConnectIPhoneCamera ? .on : .off
-        camMenu.addItem(autoIPhoneItem)
+        captureMenu.addItem(.separator())
 
-        let upperBodyItem = NSMenuItem(title: "联动上半身与双臂 (3D 骨架)", action: #selector(toggleUpperBodyTracking), keyEquivalent: "")
-        upperBodyItem.target = self
-        upperBodyItem.state = controller.cameraTracker.upperBodyTrackingEnabled ? .on : .off
-        camMenu.addItem(upperBodyItem)
-
-        let mirrorItem = NSMenuItem(title: "镜像左右表情 (Mirror)", action: #selector(toggleCameraMirror), keyEquivalent: "")
-        mirrorItem.target = self
-        mirrorItem.state = controller.cameraTracker.mirrorMode ? .on : .off
-        camMenu.addItem(mirrorItem)
-
-        let calibrateItem = NSMenuItem(title: "校准中性表情与坐姿", action: #selector(calibrateCameraNeutral), keyEquivalent: "")
-        calibrateItem.target = self
-        calibrateItem.isEnabled = controller.cameraTrackingActive
-        camMenu.addItem(calibrateItem)
-
-        let refreshCamItem = NSMenuItem(title: "刷新摄像头列表", action: #selector(refreshCameraList), keyEquivalent: "")
-        refreshCamItem.target = self
-        camMenu.addItem(refreshCamItem)
-
-        camMenu.addItem(.separator())
-        let iphoneHint = NSMenuItem(title: "提示：连续互通仅支持 iPhone 后置，前置 52 通道请用下方 VMC / OSC 接收", action: nil, keyEquivalent: "")
-        iphoneHint.isEnabled = false
-        camMenu.addItem(iphoneHint)
-
-        let camRoot = NSMenuItem(title: controller.cameraTrackingActive ? "摄像头捕捉 (运行中)" : "摄像头捕捉 (Mac / iPhone)", action: nil, keyEquivalent: "")
-        camRoot.submenu = camMenu
-        menu.addItem(camRoot)
-
-        // 1b. VMC / OSC UDP Receiver submenu (iPhone TrueDepth / XR Animator / VSeeFace)
-        let vmcMenu = NSMenu()
-        let vmcPort = controller.vmcActive ? controller.vmcController.port : preferredVMCPort
-        let vmcToggleTitle = controller.vmcActive
-            ? "关闭 VMC 接收 (UDP \(vmcPort))"
-            : "开启 VMC 接收 (UDP \(vmcPort))"
-        let vmcToggleItem = NSMenuItem(title: vmcToggleTitle, action: #selector(toggleVMCReceiver), keyEquivalent: "")
-        vmcToggleItem.target = self
-        vmcToggleItem.state = controller.vmcActive ? .on : .off
-        vmcMenu.addItem(vmcToggleItem)
+        // External VMC/OSC Receiver section
+        let extVMCTitle = (controller.vmcActive && !controller.localMotionActive)
+            ? "关闭外部 VMC / OSC 接收 (UDP \(vmcPort))"
+            : "仅开启外部 VMC / OSC 接收 (UDP \(vmcPort))"
+        let extVMCItem = NSMenuItem(title: extVMCTitle, action: #selector(toggleExternalVMCReceiver), keyEquivalent: "")
+        extVMCItem.target = self
+        extVMCItem.state = (controller.vmcActive && !controller.localMotionActive) ? .on : .off
+        captureMenu.addItem(extVMCItem)
 
         let vmcStatusText: String
         if !controller.vmcActive {
             vmcStatusText = "状态：未开启"
         } else if controller.vmcReceiving {
-            vmcStatusText = "状态：接收中（已收 \(controller.vmcController.packetCount) 包 · \(controller.vmcController.receivedBoneCount) 骨骼 / \(controller.vmcController.receivedBlendShapeCount) 表情）"
+            let modeTag = controller.localMotionActive ? "本机精捕" : "外部 VMC"
+            vmcStatusText = "状态：\(modeTag)接收中（\(controller.vmcController.receivedBoneCount) 骨骼 / \(controller.vmcController.receivedBlendShapeCount) 表情 · \(controller.vmcController.packetCount) 包）"
+        } else if controller.localMotionActive {
+            vmcStatusText = "状态：本机 MediaPipe 模型加载中…"
         } else {
             vmcStatusText = "状态：监听中 (UDP \(vmcPort))，等待发包…"
         }
         let vmcStatusItem = NSMenuItem(title: vmcStatusText, action: nil, keyEquivalent: "")
         vmcStatusItem.isEnabled = false
-        vmcMenu.addItem(vmcStatusItem)
-        vmcMenu.addItem(.separator())
+        captureMenu.addItem(vmcStatusItem)
 
         let localIP = VMCTrackingController.primaryLocalIPv4() ?? "127.0.0.1"
         let copyIPItem = NSMenuItem(
@@ -298,41 +282,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         copyIPItem.target = self
         copyIPItem.representedObject = localIP
-        vmcMenu.addItem(copyIPItem)
+        captureMenu.addItem(copyIPItem)
 
+        let portMenu = NSMenu()
         let portChoices: [(String, UInt16)] = [
-            ("监听端口：39539（默认 · Waidayo / VSeeFace）", VMCTrackingController.defaultPort),
-            ("监听端口：39540（Performer / 备用）", VMCTrackingController.secondaryPort),
+            ("39539（默认 · Waidayo / XR Animator）", VMCTrackingController.defaultPort),
+            ("39540（Performer / 备用）", VMCTrackingController.secondaryPort),
         ]
         for (title, portNum) in portChoices {
             let item = NSMenuItem(title: title, action: #selector(selectVMCPort(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = Int(portNum)
             item.state = (vmcPort == portNum) ? .on : .off
-            vmcMenu.addItem(item)
+            portMenu.addItem(item)
         }
+        let portRoot = NSMenuItem(title: "VMC 监听端口 (\(vmcPort))", action: nil, keyEquivalent: "")
+        portRoot.submenu = portMenu
+        captureMenu.addItem(portRoot)
 
         let hipsPosItem = NSMenuItem(title: "应用 Hips 根位移（关闭可防跑出窗口）", action: #selector(toggleVMCAppliesHipsPosition), keyEquivalent: "")
         hipsPosItem.target = self
         hipsPosItem.state = controller.vmcController.appliesHipsPosition ? .on : .off
-        vmcMenu.addItem(hipsPosItem)
+        captureMenu.addItem(hipsPosItem)
 
-        vmcMenu.addItem(.separator())
-        let vmcHintItem = NSMenuItem(title: "兼容：iPhone 前置 Waidayo / iFacialMocap、Mac 端 XR Animator", action: nil, keyEquivalent: "")
-        vmcHintItem.isEnabled = false
-        vmcMenu.addItem(vmcHintItem)
-
-        let vmcRootTitle: String
-        if controller.vmcReceiving {
-            vmcRootTitle = "VMC / OSC 接收 (接收中 · \(vmcPort))"
+        let captureRootTitle: String
+        if controller.localMotionActive {
+            captureRootTitle = controller.vmcReceiving ? "动作与面部捕捉 (本机精捕运行中)" : "动作与面部捕捉 (本机精捕启动中…)"
+        } else if controller.vmcReceiving {
+            captureRootTitle = "动作与面部捕捉 (VMC 接收中 · \(vmcPort))"
         } else if controller.vmcActive {
-            vmcRootTitle = "VMC / OSC 接收 (监听中 · \(vmcPort))"
+            captureRootTitle = "动作与面部捕捉 (VMC 监听中 · \(vmcPort))"
         } else {
-            vmcRootTitle = "VMC / OSC 接收 (iPhone 前置 / XR Animator)"
+            captureRootTitle = "动作与面部捕捉 (VMC)"
         }
-        let vmcRoot = NSMenuItem(title: vmcRootTitle, action: nil, keyEquivalent: "")
-        vmcRoot.submenu = vmcMenu
-        menu.addItem(vmcRoot)
+        let captureRoot = NSMenuItem(title: captureRootTitle, action: nil, keyEquivalent: "")
+        captureRoot.submenu = captureMenu
+        menu.addItem(captureRoot)
 
         // 2. Pose & AFK Mode Submenu
         let poseMenu = NSMenu()
@@ -558,26 +543,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Actions
 
-    @objc private func selectCameraDevice(_ sender: NSMenuItem) {
-        guard let deviceID = sender.representedObject as? String else { return }
-        controller.startCameraCapture(deviceID: deviceID)
+    @objc private func toggleLocalMotionCapture() {
+        if controller.localMotionActive {
+            controller.stopLocalMotionCapture()
+        } else {
+            _ = controller.startLocalMotionCapture(port: preferredVMCPort)
+        }
         updateStatusBarTitle()
         refreshMenus()
     }
 
-    @objc private func stopCameraCapture() {
-        controller.stopCameraCapture()
-        updateStatusBarTitle()
-        refreshMenus()
-    }
-
-    @objc private func toggleVMCReceiver() {
-        if controller.vmcActive {
+    @objc private func toggleExternalVMCReceiver() {
+        if controller.vmcActive && !controller.localMotionActive {
             controller.stopVMC()
         } else {
+            controller.localMotionService.stop()
             _ = controller.startVMC(port: preferredVMCPort)
         }
         updateStatusBarTitle()
+        refreshMenus()
+    }
+
+    private func restartLocalMotionIfRunning() {
+        if controller.localMotionActive {
+            _ = controller.startLocalMotionCapture(port: preferredVMCPort)
+        }
+    }
+
+    @objc private func toggleLocalMotionBody() {
+        controller.localMotionService.enableBody.toggle()
+        UserDefaults.standard.set(controller.localMotionService.enableBody, forKey: motionBodyKey)
+        restartLocalMotionIfRunning()
+        refreshMenus()
+    }
+
+    @objc private func toggleLocalMotionHands() {
+        controller.localMotionService.enableHands.toggle()
+        UserDefaults.standard.set(controller.localMotionService.enableHands, forKey: motionHandsKey)
+        restartLocalMotionIfRunning()
+        refreshMenus()
+    }
+
+    @objc private func toggleLocalMotionMirror() {
+        controller.localMotionService.mirrorMode.toggle()
+        UserDefaults.standard.set(controller.localMotionService.mirrorMode, forKey: motionMirrorKey)
+        restartLocalMotionIfRunning()
+        refreshMenus()
+    }
+
+    @objc private func selectLocalMotionCamera(_ sender: NSMenuItem) {
+        guard let idx = sender.representedObject as? Int else { return }
+        controller.localMotionService.cameraIndex = max(0, idx)
+        UserDefaults.standard.set(controller.localMotionService.cameraIndex, forKey: motionCameraIndexKey)
+        restartLocalMotionIfRunning()
+        refreshMenus()
+    }
+
+    @objc private func selectLocalMotionPoseTier(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let tier = MotionPoseModelTier(rawValue: raw) else { return }
+        controller.localMotionService.poseModel = tier
+        UserDefaults.standard.set(tier.rawValue, forKey: motionPoseTierKey)
+        restartLocalMotionIfRunning()
         refreshMenus()
     }
 
@@ -586,7 +613,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               portInt > 0, portInt <= Int(UInt16.max) else { return }
         let newPort = UInt16(portInt)
         preferredVMCPort = newPort
-        if controller.vmcActive {
+        if controller.localMotionActive {
+            _ = controller.startLocalMotionCapture(port: newPort)
+        } else if controller.vmcActive {
             _ = controller.startVMC(port: newPort)
         }
         updateStatusBarTitle()
@@ -609,38 +638,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshMenus()
     }
 
-    @objc private func toggleUpperBodyTracking() {
-        controller.cameraTracker.upperBodyTrackingEnabled.toggle()
-        let enabled = controller.cameraTracker.upperBodyTrackingEnabled
-        UserDefaults.standard.set(enabled, forKey: upperBodyTrackingKey)
-        if !enabled {
-            controller.bodySolver.reset()
-        }
-        AppLogger.shared.info("Camera", "upperBodyTrackingEnabled=\(enabled)")
-        refreshMenus()
-    }
-
-    @objc private func calibrateCameraNeutral() {
-        controller.calibrateCameraNeutral()
-    }
-
-    @objc private func toggleCameraMirror() {
-        controller.cameraTracker.mirrorMode.toggle()
-        refreshMenus()
-    }
-
-    @objc private func toggleAutoConnectIPhone() {
-        autoConnectIPhoneCamera.toggle()
-        AppLogger.shared.info("App", "autoConnectIPhoneCamera=\(autoConnectIPhoneCamera)")
-        refreshMenus()
-    }
-
     @objc private func openLogFolder() {
         NSWorkspace.shared.activateFileViewerSelecting([AppLogger.shared.logFileURL])
-    }
-
-    @objc private func refreshCameraList() {
-        refreshMenus()
     }
 
     @objc private func selectPoseMode(_ sender: NSMenuItem) {
@@ -810,13 +809,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        controller?.vmcController.stop()
-        controller?.cameraTracker.stopSync()
+        controller?.stopAllTrackingSync()
     }
 
     @objc private func quitApp() {
-        controller.stopVMC()
-        controller.stopCameraCapture()
+        controller.stopAllTrackingSync()
         NSApp.terminate(nil)
     }
 }
