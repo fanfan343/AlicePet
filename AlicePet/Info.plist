@@ -24,5 +24,7 @@
     <true/>
     <key>NSCameraUsageDescription</key>
     <string>AlicePet 需要访问 Mac 或 iPhone（连续互通相机）摄像头来进行实时面部捕捉与表情驱动。</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>AlicePet 需要在局域网监听 UDP 端口（39539 / 39540），以接收来自 iPhone 或本机动捕软件的 VMC / OSC 面部与骨骼数据。</string>
 </dict>
 </plist>

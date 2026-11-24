@@ -26,8 +26,8 @@
 ## Stage 4：面捕与上半身捕捉进阶
 - [x] 抗歪头旋转不变的眼睛开合比（EAR）计算
 - [x] 中性表情与坐姿一键校准、双目平均瞳孔视线追踪、皱眉/脸颊联动
-- [x] 原生 Apple Vision 3D 上半身骨架追踪（`VNDetectHumanBodyPose3DRequest` + `BodyTrackingSolver` 1€ 滤波，驱动脊柱/胸口/双臂联动）
-- [ ] 可选支持 MediaPipe 52 通道精捕子服务（`services/`）或 iPhone VMC/OSC 52 通道实时输入
+- [x] 原生 Apple Vision 上半身骨架追踪（20Hz 2D 关键点 + `BodyTrackingSolver` 1€ 滤波，驱动脊柱/胸口/双臂联动）
+- [x] VMC / OSC UDP 实时接收器（默认端口 `39539` / `39540`，支持 iPhone 前置 TrueDepth 52 通道 ARKit PerfectSync + 上半身/全身骨骼，兼容 Waidayo / iFacialMocap / XR Animator）
 
 ## Stage 5：AI 大脑与语音口型（LLM + TTS）
 - [ ] 在 `services/llm/` 中接入可切换的在线 / 本地 LLM 对话服务

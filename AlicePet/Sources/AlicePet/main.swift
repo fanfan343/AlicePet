@@ -1,6 +1,8 @@
 import AppKit
+import Darwin
 import Foundation
 import VRMMetalKit
+import simd
 
 let preferredDefaultModelPaths = [
     "/Users/funnyliu/Downloads/VRM项目/降采样模型/Alicephil VRM (TexLite).vrm",
@@ -27,8 +29,129 @@ func resolveInitialModelURL(isHeadlessSnapshot: Bool) -> URL {
     return URL(fileURLWithPath: defaultModelPath)
 }
 
-let isSnapshotMode = (parseArg("--snapshot") != nil)
+let vmcLoopbackPath = parseArg("--test-vmc-loopback")
+let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil)
 let modelURL = resolveInitialModelURL(isHeadlessSnapshot: isSnapshotMode)
+
+func sendLoopbackUDP(_ data: Data, toPort port: UInt16) throws {
+    let sock = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    guard sock >= 0 else {
+        throw NSError(domain: "AlicePet.VMC", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "socket() failed"])
+    }
+    defer { Darwin.close(sock) }
+
+    var addr = sockaddr_in()
+    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    addr.sin_family = sa_family_t(AF_INET)
+    addr.sin_port = port.bigEndian
+    addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+    let sent = data.withUnsafeBytes { rawBuf -> ssize_t in
+        guard let base = rawBuf.baseAddress else { return -1 }
+        return withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { saPtr in
+                Darwin.sendto(sock, base, data.count, 0, saPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+    }
+    guard sent == data.count else {
+        throw NSError(domain: "AlicePet.VMC", code: Int(errno), userInfo: [NSLocalizedDescriptionKey: "sendto() sent \(sent)/\(data.count) bytes"])
+    }
+}
+
+if let loopbackOutputPath = vmcLoopbackPath {
+    var done = false
+    var exitCode: Int32 = 0
+    Task { @MainActor in
+        do {
+            let controller = try PetController(sampleCount: 1)
+            try await controller.loadModel(from: modelURL, synchronousPhysics: true)
+
+            if let viewRaw = parseArg("--view"), let preset = CameraViewPreset(rawValue: viewRaw) {
+                controller.camera.apply(preset: preset)
+            } else {
+                controller.camera.apply(preset: .upperBody)
+            }
+
+            guard controller.startVMC(port: 0), let boundPort = controller.vmcController.boundPort else {
+                throw NSError(domain: "AlicePet.VMC", code: 10, userInfo: [NSLocalizedDescriptionKey: "Failed to bind VMC UDP loopback port"])
+            }
+
+            // Build a real Unity-coordinate VMC OSC bundle (head tilt + waving left arm + mixed-case ARKit 52 wink/smile/open mouth)
+            func boneMsg(_ name: String, q: simd_quatf) -> OSCPacket {
+                .message(OSCMessage(
+                    "/VMC/Ext/Bone/Pos",
+                    .string(name),
+                    .float32(0), .float32(0), .float32(0),
+                    .float32(q.imag.x), .float32(q.imag.y), .float32(q.imag.z), .float32(q.real)
+                ))
+            }
+            func blendMsg(_ name: String, _ weight: Float) -> OSCPacket {
+                .message(OSCMessage("/VMC/Ext/Blend/Val", .string(name), .float32(weight)))
+            }
+
+            let qHead = simd_quatf(angle: 0.22, axis: SIMD3<Float>(0, 0, 1)) * simd_quatf(angle: -0.18, axis: SIMD3<Float>(0, 1, 0))
+            let qNeck = simd_quatf(angle: 0.08, axis: SIMD3<Float>(0, 0, 1))
+            let qLeftUpperArm = simd_quatf(angle: -0.55, axis: SIMD3<Float>(0, 0, 1)) * simd_quatf(angle: 0.35, axis: SIMD3<Float>(1, 0, 0))
+            let qLeftLowerArm = simd_quatf(angle: -1.15, axis: SIMD3<Float>(0, 0, 1))
+            let qRightUpperArm = simd_quatf(angle: -1.15, axis: SIMD3<Float>(0, 0, 1))
+
+            let bundle = OSCPacket.bundle(OSCBundle(elements: [
+                .message(OSCMessage("/VMC/Ext/OK", .int32(1))),
+                boneMsg("Head", q: qHead),
+                boneMsg("Neck", q: qNeck),
+                boneMsg("LeftUpperArm", q: qLeftUpperArm),
+                boneMsg("LeftLowerArm", q: qLeftLowerArm),
+                boneMsg("RightUpperArm", q: qRightUpperArm),
+                blendMsg("EyeBlinkLeft", 1.0),
+                blendMsg("jawOpen", 0.72),
+                blendMsg("MouthSmileLeft", 0.85),
+                blendMsg("mouthSmileRight", 0.85),
+                blendMsg("BrowInnerUp", 0.65),
+                blendMsg("cheekSquint_L", 0.45),
+                blendMsg("A", 0.90),
+                .message(OSCMessage("/VMC/Ext/Blend/Apply")),
+            ]))
+
+            let datagram = bundle.encode()
+            try sendLoopbackUDP(datagram, toPort: boundPort)
+
+            let deadline = Date().addingTimeInterval(1.0)
+            while controller.vmcController.packetCount == 0 || controller.vmcController.receivedBlendShapeCount < 6 {
+                if Date() > deadline { break }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+
+            guard controller.vmcController.packetCount > 0,
+                  let model = controller.model else {
+                throw NSError(domain: "AlicePet.VMC", code: 11, userInfo: [NSLocalizedDescriptionKey: "VMC UDP loopback timed out without receiving packets"])
+            }
+
+            controller.poseController.applyBasePose(to: model, restTransforms: controller.poseController.restNodeTransforms)
+            controller.poseController.applyHandGestureOverrides(to: model, recipeStore: controller.recipeStore)
+            let applied = controller.vmcController.apply(
+                to: model,
+                renderer: controller.renderer,
+                expressionMixer: controller.expressionMixer
+            )
+            controller.settleSpringBonePhysics(warmupSteps: 16)
+
+            print("VMC loopback OK: port=\(boundPort) bytes=\(datagram.count) packets=\(controller.vmcController.packetCount) bones=\(controller.vmcController.receivedBoneCount) blendShapes=\(controller.vmcController.receivedBlendShapeCount) applied=\(applied) perfectSync=\(controller.faceDriver.perfectSyncCapability)")
+
+            try await controller.renderSnapshot(to: URL(fileURLWithPath: loopbackOutputPath), applyBaseState: false)
+            print("VMC loopback snapshot saved to \(loopbackOutputPath)")
+            controller.stopVMC()
+        } catch {
+            fputs("VMC loopback error: \(error)\n", stderr)
+            exitCode = 1
+        }
+        done = true
+    }
+    while !done {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+    }
+    exit(exitCode)
+}
 
 if let snapshotPath = parseArg("--snapshot") {
     var done = false

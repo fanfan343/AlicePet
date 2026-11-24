@@ -16,7 +16,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let upperBodyTrackingKey = "cameraUpperBodyTracking"
     private let lightingPresetKey = "mtoonLightingPreset"
     private let outlineStyleKey = "mtoonOutlineStyle"
+    private let vmcPortKey = "vmcListenPort"
+    private let vmcAppliesHipsPositionKey = "vmcAppliesHipsPosition"
     nonisolated static let lastModelPathKey = "lastOpenedVRMModelPath"
+
+    private var preferredVMCPort: UInt16 {
+        get {
+            let saved = UserDefaults.standard.integer(forKey: vmcPortKey)
+            if saved > 0, saved <= Int(UInt16.max) {
+                return UInt16(saved)
+            }
+            return VMCTrackingController.defaultPort
+        }
+        set {
+            UserDefaults.standard.set(Int(newValue), forKey: vmcPortKey)
+        }
+    }
 
     private var autoConnectIPhoneCamera: Bool {
         get {
@@ -53,6 +68,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let savedOutline = UserDefaults.standard.string(forKey: outlineStyleKey),
                let style = OutlineStyle(rawValue: savedOutline) {
                 controller.setOutlineStyle(style)
+            }
+            if UserDefaults.standard.object(forKey: vmcAppliesHipsPositionKey) != nil {
+                controller.vmcController.appliesHipsPosition = UserDefaults.standard.bool(forKey: vmcAppliesHipsPositionKey)
             }
         } catch {
             AppLogger.shared.error("App", "Failed to initialize Metal/VRMMetalKit: \(error)")
@@ -124,6 +142,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, self.controller.cameraTrackingActive else { return }
             self.statusItem.button?.title = detected ? "AlicePet · 📹" : "AlicePet · 📹(未见人脸)"
         }
+        controller.onVMCStatusChanged = { [weak self] in
+            self?.updateStatusBarTitle()
+            self?.refreshMenus()
+        }
+        controller.onVMCError = { [weak self] message in
+            self?.updateStatusBarTitle()
+            self?.refreshMenus()
+            let alert = NSAlert()
+            alert.messageText = "VMC / OSC 接收提醒"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
 
         controller.hostView = mtkView
         window.contentView = mtkView
@@ -154,6 +185,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "AlicePet"
         statusItem.menu = buildMenu()
+    }
+
+    private func updateStatusBarTitle() {
+        if controller.vmcActive {
+            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 📡" : "AlicePet · 📡(等待)"
+        } else if controller.cameraTrackingActive {
+            statusItem.button?.title = "AlicePet · 📹"
+        } else {
+            statusItem.button?.title = "AlicePet"
+        }
     }
 
     private func refreshMenus() {
@@ -217,13 +258,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         camMenu.addItem(refreshCamItem)
 
         camMenu.addItem(.separator())
-        let iphoneHint = NSMenuItem(title: "提示：连续互通仅支持 iPhone 后置，前置需后续 VMC 协议", action: nil, keyEquivalent: "")
+        let iphoneHint = NSMenuItem(title: "提示：连续互通仅支持 iPhone 后置，前置 52 通道请用下方 VMC / OSC 接收", action: nil, keyEquivalent: "")
         iphoneHint.isEnabled = false
         camMenu.addItem(iphoneHint)
 
         let camRoot = NSMenuItem(title: controller.cameraTrackingActive ? "摄像头捕捉 (运行中)" : "摄像头捕捉 (Mac / iPhone)", action: nil, keyEquivalent: "")
         camRoot.submenu = camMenu
         menu.addItem(camRoot)
+
+        // 1b. VMC / OSC UDP Receiver submenu (iPhone TrueDepth / XR Animator / VSeeFace)
+        let vmcMenu = NSMenu()
+        let vmcPort = controller.vmcActive ? controller.vmcController.port : preferredVMCPort
+        let vmcToggleTitle = controller.vmcActive
+            ? "关闭 VMC 接收 (UDP \(vmcPort))"
+            : "开启 VMC 接收 (UDP \(vmcPort))"
+        let vmcToggleItem = NSMenuItem(title: vmcToggleTitle, action: #selector(toggleVMCReceiver), keyEquivalent: "")
+        vmcToggleItem.target = self
+        vmcToggleItem.state = controller.vmcActive ? .on : .off
+        vmcMenu.addItem(vmcToggleItem)
+
+        let vmcStatusText: String
+        if !controller.vmcActive {
+            vmcStatusText = "状态：未开启"
+        } else if controller.vmcReceiving {
+            vmcStatusText = "状态：接收中（已收 \(controller.vmcController.packetCount) 包 · \(controller.vmcController.receivedBoneCount) 骨骼 / \(controller.vmcController.receivedBlendShapeCount) 表情）"
+        } else {
+            vmcStatusText = "状态：监听中 (UDP \(vmcPort))，等待发包…"
+        }
+        let vmcStatusItem = NSMenuItem(title: vmcStatusText, action: nil, keyEquivalent: "")
+        vmcStatusItem.isEnabled = false
+        vmcMenu.addItem(vmcStatusItem)
+        vmcMenu.addItem(.separator())
+
+        let localIP = VMCTrackingController.primaryLocalIPv4() ?? "127.0.0.1"
+        let copyIPItem = NSMenuItem(
+            title: "复制本机 IP：\(localIP)（端口 \(vmcPort)）",
+            action: #selector(copyLocalVMCAddress(_:)),
+            keyEquivalent: ""
+        )
+        copyIPItem.target = self
+        copyIPItem.representedObject = localIP
+        vmcMenu.addItem(copyIPItem)
+
+        let portChoices: [(String, UInt16)] = [
+            ("监听端口：39539（默认 · Waidayo / VSeeFace）", VMCTrackingController.defaultPort),
+            ("监听端口：39540（Performer / 备用）", VMCTrackingController.secondaryPort),
+        ]
+        for (title, portNum) in portChoices {
+            let item = NSMenuItem(title: title, action: #selector(selectVMCPort(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = Int(portNum)
+            item.state = (vmcPort == portNum) ? .on : .off
+            vmcMenu.addItem(item)
+        }
+
+        let hipsPosItem = NSMenuItem(title: "应用 Hips 根位移（关闭可防跑出窗口）", action: #selector(toggleVMCAppliesHipsPosition), keyEquivalent: "")
+        hipsPosItem.target = self
+        hipsPosItem.state = controller.vmcController.appliesHipsPosition ? .on : .off
+        vmcMenu.addItem(hipsPosItem)
+
+        vmcMenu.addItem(.separator())
+        let vmcHintItem = NSMenuItem(title: "兼容：iPhone 前置 Waidayo / iFacialMocap、Mac 端 XR Animator", action: nil, keyEquivalent: "")
+        vmcHintItem.isEnabled = false
+        vmcMenu.addItem(vmcHintItem)
+
+        let vmcRootTitle: String
+        if controller.vmcReceiving {
+            vmcRootTitle = "VMC / OSC 接收 (接收中 · \(vmcPort))"
+        } else if controller.vmcActive {
+            vmcRootTitle = "VMC / OSC 接收 (监听中 · \(vmcPort))"
+        } else {
+            vmcRootTitle = "VMC / OSC 接收 (iPhone 前置 / XR Animator)"
+        }
+        let vmcRoot = NSMenuItem(title: vmcRootTitle, action: nil, keyEquivalent: "")
+        vmcRoot.submenu = vmcMenu
+        menu.addItem(vmcRoot)
 
         // 2. Pose & AFK Mode Submenu
         let poseMenu = NSMenu()
@@ -452,13 +561,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func selectCameraDevice(_ sender: NSMenuItem) {
         guard let deviceID = sender.representedObject as? String else { return }
         controller.startCameraCapture(deviceID: deviceID)
-        statusItem.button?.title = "AlicePet · 📹"
+        updateStatusBarTitle()
         refreshMenus()
     }
 
     @objc private func stopCameraCapture() {
         controller.stopCameraCapture()
-        statusItem.button?.title = "AlicePet"
+        updateStatusBarTitle()
+        refreshMenus()
+    }
+
+    @objc private func toggleVMCReceiver() {
+        if controller.vmcActive {
+            controller.stopVMC()
+        } else {
+            _ = controller.startVMC(port: preferredVMCPort)
+        }
+        updateStatusBarTitle()
+        refreshMenus()
+    }
+
+    @objc private func selectVMCPort(_ sender: NSMenuItem) {
+        guard let portInt = sender.representedObject as? Int,
+              portInt > 0, portInt <= Int(UInt16.max) else { return }
+        let newPort = UInt16(portInt)
+        preferredVMCPort = newPort
+        if controller.vmcActive {
+            _ = controller.startVMC(port: newPort)
+        }
+        updateStatusBarTitle()
+        refreshMenus()
+    }
+
+    @objc private func copyLocalVMCAddress(_ sender: NSMenuItem) {
+        guard let ip = sender.representedObject as? String else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(ip, forType: .string)
+        AppLogger.shared.info("VMC", "Copied local IPv4 '\(ip)' to clipboard")
+    }
+
+    @objc private func toggleVMCAppliesHipsPosition() {
+        controller.vmcController.appliesHipsPosition.toggle()
+        let enabled = controller.vmcController.appliesHipsPosition
+        UserDefaults.standard.set(enabled, forKey: vmcAppliesHipsPositionKey)
+        AppLogger.shared.info("VMC", "appliesHipsPosition=\(enabled)")
         refreshMenus()
     }
 
@@ -663,10 +810,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        controller?.vmcController.stop()
         controller?.cameraTracker.stopSync()
     }
 
     @objc private func quitApp() {
+        controller.stopVMC()
         controller.stopCameraCapture()
         NSApp.terminate(nil)
     }
