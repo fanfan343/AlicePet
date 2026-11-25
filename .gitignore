@@ -28,10 +28,17 @@ services/**/*.onnx
 services/**/*.onnx.data
 services/**/*.m4a
 services/ardy/models/
+services/tts/models/a2f_claire/
+services/**/*.npz
 services/**/*.pt
 services/**/*.ckpt
 services/**/*.task
 services/**/*.tflite
+
+# Picture-World local depth/image caches
+scenes/**/depth.bin
+scenes/**/*.jpg
+scenes/**/*.jpeg
 
 # VRM / glTF model assets (large binaries & third-party licensed assets)
 *.vrm

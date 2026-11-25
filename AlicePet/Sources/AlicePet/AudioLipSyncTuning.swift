@@ -1,7 +1,42 @@
 import AppKit
 import Foundation
 
+enum AudioFaceEngine: String, CaseIterable, Codable {
+    case lam = "lam"
+    case a2fClaire = "a2f_claire"
+
+    var displayTitle: String {
+        switch self {
+        case .lam: return "LAM (极速口型)"
+        case .a2fClaire: return "NVIDIA Audio2Face-3D (全脸情绪)"
+        }
+    }
+}
+
+enum AudioFaceEmotion: String, CaseIterable, Codable {
+    case neutral = "neutral"
+    case joy = "joy"
+    case cheekiness = "cheekiness"
+    case amazement = "amazement"
+    case sadness = "sadness"
+    case anger = "anger"
+
+    var displayTitle: String {
+        switch self {
+        case .neutral: return "中性"
+        case .joy: return "开心"
+        case .cheekiness: return "俏皮"
+        case .amazement: return "惊讶"
+        case .sadness: return "委屈"
+        case .anger: return "生气"
+        }
+    }
+}
+
 struct AudioLipSyncParams: Codable, Equatable {
+    var engine: AudioFaceEngine = .a2fClaire
+    var emotion: AudioFaceEmotion = .joy
+    var emotionStrength: Double = 0.70
     var jawGain: Double = 3.00
     var vowelGain: Double = 2.50
     var lipCloseStrength: Double = 1.50
@@ -13,7 +48,7 @@ struct AudioLipSyncParams: Codable, Equatable {
     var naturalBlinks: Bool = true
     var loopPlayback: Bool = true
 
-    private static let defaultsKey = "labAudioLipSyncParamsV2"
+    private static let defaultsKey = "labAudioLipSyncParamsV3"
 
     static func loadFromDefaults() -> AudioLipSyncParams {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey),
@@ -31,6 +66,9 @@ struct AudioLipSyncParams: Codable, Equatable {
 
     func toLiveJSONLine() -> Data? {
         let dict: [String: Any] = [
+            "engine": engine.rawValue,
+            "emotion": emotion.rawValue,
+            "emotion_strength": emotionStrength,
             "jaw_gain": jawGain,
             "vowel_gain": vowelGain,
             "lip_close_strength": lipCloseStrength,
@@ -49,9 +87,9 @@ struct AudioLipSyncParams: Codable, Equatable {
 
     func prettyRecipeSummary() -> String {
         String(
-            format: "jaw=%.2f, vowel=%.2f, close=%.2f, reveal=%.2f, smooth=%.2f, upper=%.2f, head=%.2f, offset=%.0fms, blink=%@",
-            jawGain, vowelGain, lipCloseStrength, lipRevealGain, smoothing, upperFaceGain, headMotionGain, syncOffsetMs,
-            naturalBlinks ? "on" : "off"
+            format: "engine=%@, emo=%@(%.2f), jaw=%.2f, vowel=%.2f, close=%.2f, reveal=%.2f, smooth=%.2f, upper=%.2f, head=%.2f, offset=%.0fms",
+            engine.rawValue, emotion.rawValue, emotionStrength,
+            jawGain, vowelGain, lipCloseStrength, lipRevealGain, smoothing, upperFaceGain, headMotionGain, syncOffsetMs
         )
     }
 }
@@ -71,28 +109,32 @@ enum AudioLipSyncPreset: String, CaseIterable {
         }
     }
 
-    func apply(preservingLoop loop: Bool, offsetMs: Double) -> AudioLipSyncParams {
+    func apply(preservingEngine engine: AudioFaceEngine, emotion: AudioFaceEmotion, emotionStrength: Double, loop: Bool, offsetMs: Double) -> AudioLipSyncParams {
         switch self {
         case .animeStandard:
             return AudioLipSyncParams(
+                engine: engine, emotion: emotion, emotionStrength: emotionStrength,
                 jawGain: 3.00, vowelGain: 2.50, lipCloseStrength: 1.50, lipRevealGain: 1.50,
                 smoothing: 0.00, upperFaceGain: 1.50, headMotionGain: 1.40,
                 syncOffsetMs: offsetMs, naturalBlinks: true, loopPlayback: loop
             )
         case .energetic:
             return AudioLipSyncParams(
+                engine: engine, emotion: emotion, emotionStrength: emotionStrength,
                 jawGain: 3.60, vowelGain: 2.05, lipCloseStrength: 0.45, lipRevealGain: 0.78,
                 smoothing: 0.20, upperFaceGain: 1.35, headMotionGain: 1.40,
                 syncOffsetMs: offsetMs, naturalBlinks: true, loopPlayback: loop
             )
         case .gentleSoft:
             return AudioLipSyncParams(
+                engine: engine, emotion: emotion, emotionStrength: emotionStrength,
                 jawGain: 1.95, vowelGain: 1.20, lipCloseStrength: 0.72, lipRevealGain: 0.40,
                 smoothing: 0.50, upperFaceGain: 0.75, headMotionGain: 0.65,
                 syncOffsetMs: offsetMs, naturalBlinks: true, loopPlayback: loop
             )
         case .rawRealistic:
             return AudioLipSyncParams(
+                engine: engine, emotion: emotion, emotionStrength: emotionStrength,
                 jawGain: 1.00, vowelGain: 1.00, lipCloseStrength: 0.00, lipRevealGain: 1.00,
                 smoothing: 0.15, upperFaceGain: 1.00, headMotionGain: 0.00,
                 syncOffsetMs: offsetMs, naturalBlinks: false, loopPlayback: loop
@@ -115,6 +157,8 @@ final class AudioLipSyncTuningPanel: NSObject {
     }
 
     private var rows: [SliderRow] = []
+    private let enginePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let emotionControl = NSSegmentedControl()
     private let loopCheckbox = NSButton(checkboxWithTitle: "循环播放（边听边调，实时生效）", target: nil, action: nil)
     private let blinkCheckbox = NSButton(checkboxWithTitle: "自然周期眨眼叠加", target: nil, action: nil)
     private let playButton = NSButton(title: "播放 10s 测试", target: nil, action: nil)
@@ -129,7 +173,7 @@ final class AudioLipSyncTuningPanel: NSObject {
 
     init(initialParams: AudioLipSyncParams) {
         self.params = initialParams
-        let size = NSSize(width: 400, height: 520)
+        let size = NSSize(width: 420, height: 610)
         self.panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .utilityWindow],
@@ -138,7 +182,7 @@ final class AudioLipSyncTuningPanel: NSObject {
         )
         super.init()
 
-        panel.title = "Lab · 口型与表情实时调参 (LAM 52通道)"
+        panel.title = "Lab · 口型与全脸情绪调参 (Audio2Face-3D / LAM)"
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -170,6 +214,37 @@ final class AudioLipSyncTuningPanel: NSObject {
         root.spacing = 10
         root.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
         root.translatesAutoresizingMaskIntoConstraints = false
+
+        // 0. Engine & Emotion selectors (for NVIDIA Audio2Face-3D)
+        let engineLabel = NSTextField(labelWithString: "面部推理引擎（切换后重播生效）")
+        engineLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        engineLabel.textColor = .secondaryLabelColor
+        root.addArrangedSubview(engineLabel)
+
+        enginePopup.removeAllItems()
+        for eng in AudioFaceEngine.allCases {
+            enginePopup.addItem(withTitle: eng.displayTitle)
+        }
+        enginePopup.target = self
+        enginePopup.action = #selector(engineChanged)
+        root.addArrangedSubview(enginePopup)
+        enginePopup.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+
+        let emoLabel = NSTextField(labelWithString: "原生情绪控制（Audio2Face-3D 实时生效）")
+        emoLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        emoLabel.textColor = .secondaryLabelColor
+        root.addArrangedSubview(emoLabel)
+
+        let emotions = AudioFaceEmotion.allCases
+        emotionControl.segmentCount = emotions.count
+        emotionControl.trackingMode = .selectOne
+        for (i, emo) in emotions.enumerated() {
+            emotionControl.setLabel(emo.displayTitle, forSegment: i)
+        }
+        emotionControl.target = self
+        emotionControl.action = #selector(emotionChanged)
+        root.addArrangedSubview(emotionControl)
+        emotionControl.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
 
         // 1. Preset row
         let presetLabel = NSTextField(labelWithString: "一键预设风格")
@@ -323,6 +398,12 @@ final class AudioLipSyncTuningPanel: NSObject {
     }
 
     private func syncControlsFromParams() {
+        if let engIdx = AudioFaceEngine.allCases.firstIndex(of: params.engine) {
+            enginePopup.selectItem(at: engIdx)
+        }
+        if let emoIdx = AudioFaceEmotion.allCases.firstIndex(of: params.emotion) {
+            emotionControl.selectedSegment = emoIdx
+        }
         for row in rows {
             let v = valueFor(key: row.key)
             row.slider.doubleValue = v
@@ -330,6 +411,22 @@ final class AudioLipSyncTuningPanel: NSObject {
         }
         loopCheckbox.state = params.loopPlayback ? .on : .off
         blinkCheckbox.state = params.naturalBlinks ? .on : .off
+    }
+
+    @objc private func engineChanged() {
+        let all = AudioFaceEngine.allCases
+        let idx = enginePopup.indexOfSelectedItem
+        guard idx >= 0, idx < all.count else { return }
+        params.engine = all[idx]
+        emitChanged()
+    }
+
+    @objc private func emotionChanged() {
+        let all = AudioFaceEmotion.allCases
+        let idx = emotionControl.selectedSegment
+        guard idx >= 0, idx < all.count else { return }
+        params.emotion = all[idx]
+        emitChanged()
     }
 
     private func emitChanged() {
@@ -355,7 +452,13 @@ final class AudioLipSyncTuningPanel: NSObject {
     @objc private func applyPreset(_ sender: NSButton) {
         let all = AudioLipSyncPreset.allCases
         guard sender.tag >= 0, sender.tag < all.count else { return }
-        params = all[sender.tag].apply(preservingLoop: params.loopPlayback, offsetMs: params.syncOffsetMs)
+        params = all[sender.tag].apply(
+            preservingEngine: params.engine,
+            emotion: params.emotion,
+            emotionStrength: params.emotionStrength,
+            loop: params.loopPlayback,
+            offsetMs: params.syncOffsetMs
+        )
         syncControlsFromParams()
         emitChanged()
     }

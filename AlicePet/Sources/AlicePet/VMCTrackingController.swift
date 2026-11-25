@@ -3,6 +3,31 @@ import Foundation
 import VRMMetalKit
 import simd
 
+/// Channel mask controlling which ARKit facial regions a VMC stream is allowed to drive.
+/// Keeps speech lip-sync decoupled from eye LookAt and procedural Auto-Blink.
+struct VMCFaceChannelMask: OptionSet, Sendable {
+    let rawValue: UInt8
+
+    static let lowerFace = VMCFaceChannelMask(rawValue: 1 << 0)    // jaw*, mouth*, tongueOut, noseSneer*
+    static let upperFace = VMCFaceChannelMask(rawValue: 1 << 1)    // brow*, cheek*, eyeSquint*, eyeWide*
+    static let eyesAndBlink = VMCFaceChannelMask(rawValue: 1 << 2) // eyeBlink*, eyeLook*
+
+    static let speechAudio: VMCFaceChannelMask = [.lowerFace, .upperFace]
+    static let all: VMCFaceChannelMask = [.lowerFace, .upperFace, .eyesAndBlink]
+
+    func allows(arkitKey: String) -> Bool {
+        if self == .all { return true }
+        if arkitKey.hasPrefix("eyeBlink") || arkitKey.hasPrefix("eyeLook") {
+            return contains(.eyesAndBlink)
+        }
+        if arkitKey.hasPrefix("brow") || arkitKey.hasPrefix("cheek")
+            || arkitKey.hasPrefix("eyeSquint") || arkitKey.hasPrefix("eyeWide") {
+            return contains(.upperFace)
+        }
+        return contains(.lowerFace)
+    }
+}
+
 /// Receives VMC / OSC UDP packets (e.g. from iPhone TrueDepth apps like Waidayo / iFacialMocap
 /// or desktop trackers like XR Animator / VSeeFace) and drives bones + 52 ARKit PerfectSync /
 /// VRM preset expressions cleanly without fighting idle animations or outfit morphs.
@@ -279,7 +304,11 @@ final class VMCTrackingController {
     /// Applies ONLY blendshapes (52 ARKit PerfectSync / VRM presets) from this VMC channel
     /// (used by AnimationMixer Layer 2).
     @discardableResult
-    func applyBlendShapesOnly(on renderer: VRMRenderer, expressionMixer: ExpressionMixer) -> Bool {
+    func applyBlendShapesOnly(
+        on renderer: VRMRenderer,
+        expressionMixer: ExpressionMixer,
+        mask: VMCFaceChannelMask = .all
+    ) -> Bool {
         guard isListening, hasFreshFrame else {
             clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
             return false
@@ -290,7 +319,7 @@ final class VMCTrackingController {
             return false
         }
         wasDrivingStream = true
-        applyBlendShapes(snapshot.blendShapes, on: exprCtrl, expressionMixer: expressionMixer)
+        applyBlendShapes(snapshot.blendShapes, on: exprCtrl, expressionMixer: expressionMixer, mask: mask)
         if !isReceivingFrames {
             isReceivingFrames = true
             onStatusChanged?()
@@ -326,7 +355,8 @@ final class VMCTrackingController {
     private func applyBlendShapes(
         _ rawShapes: [String: Float],
         on exprCtrl: VRMExpressionController,
-        expressionMixer: ExpressionMixer
+        expressionMixer: ExpressionMixer,
+        mask: VMCFaceChannelMask = .all
     ) {
         var arkitShapes: [String: Float] = [:]
         var vrmPresets: [VRMExpressionPreset: Float] = [:]
@@ -336,9 +366,13 @@ final class VMCTrackingController {
             let value = min(max(rawValue, 0.0), 1.0)
             let lower = rawName.lowercased()
             if let canonicalARKit = Self.arkitKeyLookup[lower] {
-                arkitShapes[canonicalARKit] = value
+                if mask.allows(arkitKey: canonicalARKit) {
+                    arkitShapes[canonicalARKit] = value
+                }
             } else if let preset = VMCDriver.expressionPreset(blendShapeName: rawName) {
-                vrmPresets[preset] = value
+                if mask == .all || !Self.arkitOverlappingPresets.contains(preset) {
+                    vrmPresets[preset] = value
+                }
             } else if !rawName.hasPrefix(AssetRecipeStore.outfitMorphInternalPrefix) {
                 customShapes[rawName] = value
             }

@@ -59,10 +59,15 @@ final class AnimationMixer {
     private var crossfadeFromHipsPos: SIMD3<Float>?
     private var crossfadeElapsed: TimeInterval = 0
 
-    /// True whenever an external or LAM stream is actively driving facial blendshapes (pauses procedural Auto-Blink).
+    /// True only when an external full-face tracker (camera / iPhone TrueDepth) owns eyes & blink.
+    /// Speech-only audio streams (`audioFaceChannel`) leave Auto-Blink & Mouse LookAt alive.
+    var isEyeAndBlinkCaptured: Bool {
+        externalChannel.hasFreshFrame && externalChannel.receivedBlendShapeCount > 0
+    }
+
+    /// True whenever any facial stream (external VMC or Audio2Face/LAM) is actively driving blendshapes.
     var isFaceCaptured: Bool {
-        audioFaceChannel.hasFreshFrame
-            || (externalChannel.hasFreshFrame && externalChannel.receivedBlendShapeCount > 0)
+        audioFaceChannel.hasFreshFrame || isEyeAndBlinkCaptured
     }
 
     /// True whenever any internal or external VMC channel is actively receiving frames.
@@ -178,18 +183,29 @@ final class AnimationMixer {
 
         model.updateNodeTransforms()
 
-        // MARK: Layer 2 — Facial BlendShapes & LookAt / Auto-Blink Coordination
+        // MARK: Layer 2 — Split-Track Facial BlendShapes (Mouth/UpperFace vs Gaze & Auto-Blink)
         let nextFace: FaceLayerSource
         if audioFaceChannel.hasFreshFrame {
             externalChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
-            _ = audioFaceChannel.applyBlendShapesOnly(on: renderer, expressionMixer: expressionMixer)
-            if renderer.lookAtController?.enabled == true {
-                renderer.lookAtController?.enabled = false
+            // Speech audio drives LowerFace (jaw/mouth/tongue) + UpperFace (brows/cheeks/squint),
+            // leaving Eyes & Blink free so Mouse LookAt, natural saccades, and Auto-Blink stay alive!
+            _ = audioFaceChannel.applyBlendShapesOnly(
+                on: renderer,
+                expressionMixer: expressionMixer,
+                mask: .speechAudio
+            )
+            if renderer.lookAtController?.enabled == false {
+                renderer.lookAtController?.enabled = true
             }
+            expressionMixer.updateLookAt(on: renderer, poseMode: poseMode, window: window)
             nextFace = .audioFace
         } else if externalChannel.hasFreshFrame && externalChannel.receivedBlendShapeCount > 0 {
             audioFaceChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
-            _ = externalChannel.applyBlendShapesOnly(on: renderer, expressionMixer: expressionMixer)
+            _ = externalChannel.applyBlendShapesOnly(
+                on: renderer,
+                expressionMixer: expressionMixer,
+                mask: .all
+            )
             if renderer.lookAtController?.enabled == true {
                 renderer.lookAtController?.enabled = false
             }

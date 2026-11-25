@@ -59,9 +59,15 @@ final class LocalAudioFaceService {
             return false
         }
 
-        let modelURL = serviceDir.appendingPathComponent("models/lam-int8.onnx")
-        guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            let msg = "缺少 LAM_Audio2Expression ONNX 模型：\(modelURL.path)"
+        let a2fScript = serviceDir.appendingPathComponent("audio2face3d_vmc.py")
+        let a2fModel = serviceDir.appendingPathComponent("models/a2f_claire/network.onnx")
+        let useA2F = (params.engine == .a2fClaire)
+            && FileManager.default.fileExists(atPath: a2fScript.path)
+            && FileManager.default.fileExists(atPath: a2fModel.path)
+
+        let lamModelURL = serviceDir.appendingPathComponent("models/lam-int8.onnx")
+        if !useA2F && !FileManager.default.fileExists(atPath: lamModelURL.path) {
+            let msg = "缺少 LAM_Audio2Expression ONNX 模型：\(lamModelURL.path)"
             AppLogger.shared.error("Audio2Face", msg)
             onError?(msg)
             return false
@@ -77,24 +83,47 @@ final class LocalAudioFaceService {
         let proc = Process()
         proc.executableURL = pythonURL
         proc.currentDirectoryURL = serviceDir
-        var args = [
-            "audio2face_vmc.py",
-            "--audio", targetAudio.path,
-            "--model", modelURL.path,
-            "--host", "127.0.0.1",
-            "--port", String(port),
-            "--jaw-gain", String(format: "%.3f", params.jawGain),
-            "--vowel-gain", String(format: "%.3f", params.vowelGain),
-            "--lip-close", String(format: "%.3f", params.lipCloseStrength),
-            "--lip-reveal", String(format: "%.3f", params.lipRevealGain),
-            "--smoothing", String(format: "%.3f", params.smoothing),
-            "--upper-face", String(format: "%.3f", params.upperFaceGain),
-            "--head-motion", String(format: "%.3f", params.headMotionGain),
-            "--sync-offset-ms", String(format: "%.1f", params.syncOffsetMs),
-            "--natural-blinks", params.naturalBlinks ? "1" : "0",
-            "--loop", params.loopPlayback ? "1" : "0",
-            "--live-params",
-        ]
+        var args: [String]
+        if useA2F {
+            args = [
+                "audio2face3d_vmc.py",
+                "--audio", targetAudio.path,
+                "--models-dir", serviceDir.appendingPathComponent("models/a2f_claire").path,
+                "--host", "127.0.0.1",
+                "--port", String(port),
+                "--emotion", params.emotion.rawValue,
+                "--emotion-strength", String(format: "%.2f", params.emotionStrength),
+                "--jaw-gain", String(format: "%.3f", params.jawGain),
+                "--vowel-gain", String(format: "%.3f", params.vowelGain),
+                "--lip-close", String(format: "%.3f", params.lipCloseStrength),
+                "--lip-reveal", String(format: "%.3f", params.lipRevealGain),
+                "--smoothing", String(format: "%.3f", params.smoothing),
+                "--upper-face", String(format: "%.3f", params.upperFaceGain),
+                "--head-motion", String(format: "%.3f", params.headMotionGain),
+                "--sync-offset-ms", String(format: "%.1f", params.syncOffsetMs),
+                "--loop", params.loopPlayback ? "1" : "0",
+                "--live-params",
+            ]
+        } else {
+            args = [
+                "audio2face_vmc.py",
+                "--audio", targetAudio.path,
+                "--model", lamModelURL.path,
+                "--host", "127.0.0.1",
+                "--port", String(port),
+                "--jaw-gain", String(format: "%.3f", params.jawGain),
+                "--vowel-gain", String(format: "%.3f", params.vowelGain),
+                "--lip-close", String(format: "%.3f", params.lipCloseStrength),
+                "--lip-reveal", String(format: "%.3f", params.lipRevealGain),
+                "--smoothing", String(format: "%.3f", params.smoothing),
+                "--upper-face", String(format: "%.3f", params.upperFaceGain),
+                "--head-motion", String(format: "%.3f", params.headMotionGain),
+                "--sync-offset-ms", String(format: "%.1f", params.syncOffsetMs),
+                "--natural-blinks", params.naturalBlinks ? "1" : "0",
+                "--loop", params.loopPlayback ? "1" : "0",
+                "--live-params",
+            ]
+        }
         if maxSeconds > 0 {
             args += ["--max-seconds", String(format: "%.1f", maxSeconds)]
         }
