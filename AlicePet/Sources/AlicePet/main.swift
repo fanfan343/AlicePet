@@ -611,9 +611,23 @@ if let snapshotPath = parseArg("--snapshot") {
                     }
                 }
                 if CommandLine.arguments.contains("--pw-test-wall-walk") {
-                    // Simulate ARDY walking persistently right (+X) for 80 steps (4.0m):
+                    // 1. Standing zero-drift check: 120 frames of tiny 2mm weight-shift oscillation must NOT drift!
+                    controller.pictureWorldRenderer.resetCanvasAndAvatarToOrigin()
+                    for step in 0...120 {
+                        let jitterX = sin(Float(step) * 0.25) * 0.004
+                        let jitterZ = cos(Float(step) * 0.25) * 0.004
+                        controller.pictureWorldRenderer.applyARDYRootMotion(worldRootXZ: SIMD2<Float>(jitterX, jitterZ), viewportAspect: snapAspect)
+                    }
+                    let standPos = controller.pictureWorldRenderer.avatarWorldPosition
+                    let standDrift = simd_length(SIMD2<Float>(standPos.x, standPos.z))
+                    print(String(format: "StandingDriftCheck (120 frames): pos=(%.4f,%.4f) drift=%.4fm (must be <0.02m)", standPos.x, standPos.z, standDrift))
+                    guard standDrift < 0.02 else {
+                        throw NSError(domain: "AlicePet.PictureWorld", code: 99, userInfo: [NSLocalizedDescriptionKey: "Phantom floor drift detected: \(standDrift)m"])
+                    }
+
+                    // 2. Simulate ARDY walking persistently right (+X) for 80 steps (4.0m):
                     // verifies smooth inward yaw turn-back so Alice never gets pinned on the right edge!
-                    controller.pictureWorldRenderer.resetARDYRootTracking()
+                    controller.pictureWorldRenderer.resetCanvasAndAvatarToOrigin()
                     var rootX: Float = 0
                     for step in 0...80 {
                         rootX = Float(step) * 0.05

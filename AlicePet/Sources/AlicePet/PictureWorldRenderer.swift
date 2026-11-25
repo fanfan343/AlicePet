@@ -389,6 +389,8 @@ final class PictureWorldRenderer {
         }
 
         // 2. Unzoomed base camera frustum guard (never shrinks walkable room when user zooms in!)
+        // Use an EXACT orthonormal 2D floor basis (`rightH = perp(fwdH)`) so projection/reconstruction
+        // has ZERO cross-axis drift even when the camera has slight roll (`camUp.x != 0`).
         let baseUVScale = baseAspectFillUVScale(viewportAspect: viewportAspect)
         let imgTanHalfY = tan((cfg.fovYDegrees * .pi / 180.0) * 0.5)
         let imgAspect = Float(cfg.imageWidth) / max(Float(cfg.imageHeight), 1.0)
@@ -396,17 +398,19 @@ final class PictureWorldRenderer {
 
         let camPos = cfg.camPos
         let fwd3 = simd_normalize(cfg.camTarget - camPos)
-        let right3 = simd_normalize(simd_cross(fwd3, cfg.camUp))
         let fwdH = simd_normalize(SIMD2<Float>(fwd3.x, fwd3.z))
-        let rightH = simd_normalize(SIMD2<Float>(right3.x, right3.z))
+        // Right-handed Y-up cross((fwdH.x, 0, fwdH.y), (0, 1, 0)) = (-fwdH.y, 0, fwdH.x) -> exact dot == 0
+        let rightH = SIMD2<Float>(-fwdH.y, fwdH.x)
 
         let relH = SIMD2<Float>(p.x - camPos.x, p.z - camPos.z)
         var depth = simd_dot(relH, fwdH)
         var lateral = simd_dot(relH, rightH)
+        var frustumClamped = false
 
         let minSafeDepth: Float = 1.55
         if depth <= minSafeDepth + 0.005 {
             depth = minSafeDepth
+            frustumClamped = true
             contacts.insert("front")
             inward += fwdH
         } else if depth < minSafeDepth + nearMargin {
@@ -417,6 +421,7 @@ final class PictureWorldRenderer {
         let maxLateral = max(0.36, depth * baseTanHalfX * 0.72)
         if lateral <= -maxLateral + 0.005 {
             lateral = -maxLateral
+            frustumClamped = true
             contacts.insert("left")
             inward += rightH
         } else if lateral < -maxLateral + nearMargin {
@@ -425,6 +430,7 @@ final class PictureWorldRenderer {
         }
         if lateral >= maxLateral - 0.005 {
             lateral = maxLateral
+            frustumClamped = true
             contacts.insert("right")
             inward -= rightH
         } else if lateral > maxLateral - nearMargin {
@@ -432,9 +438,11 @@ final class PictureWorldRenderer {
             inward -= rightH * 0.6
         }
 
-        let clampedH = SIMD2<Float>(camPos.x, camPos.z) + fwdH * depth + rightH * lateral
-        p.x = clampedH.x
-        p.z = clampedH.y
+        if frustumClamped {
+            let clampedH = SIMD2<Float>(camPos.x, camPos.z) + fwdH * depth + rightH * lateral
+            p.x = clampedH.x
+            p.z = clampedH.y
+        }
 
         if let minB = cfg.walkBoundsMin, minB.count == 2,
            let maxB = cfg.walkBoundsMax, maxB.count == 2 {
