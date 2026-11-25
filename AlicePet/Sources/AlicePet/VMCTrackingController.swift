@@ -25,6 +25,9 @@ final class VMCTrackingController {
         get { driver.appliesHipsPosition }
         set { driver.appliesHipsPosition = newValue }
     }
+    /// Enables proportional 2-Bone Arm IK & torso/head anti-clipping whenever incoming VMC packets
+    /// include non-zero FK joint positions (e.g. ARDY Mini); automatically no-ops on rotation-only streams.
+    var enablesProportionalArmIK: Bool = true
 
     var packetCount: Int { receiver?.packetCount ?? 0 }
     var decodeErrorCount: Int { receiver?.decodeErrorCount ?? 0 }
@@ -38,6 +41,7 @@ final class VMCTrackingController {
     private var appliedVMCCustomKeys: Set<String> = []
     private var hasAppliedARKitShapes: Bool = false
     private var wasDrivingStream: Bool = false
+    private(set) var lastArmIKDiagnostics: [ArmIKRetargeter.ArmDiagnostics] = []
     private var restWorldCacheModelID: ObjectIdentifier?
     private var restWorldCache: [VRMHumanoidBone: simd_quatf] = [:]
 
@@ -186,6 +190,11 @@ final class VMCTrackingController {
 
         wasDrivingStream = true
         let snapshot = driver.frame
+        if enablesProportionalArmIK {
+            lastArmIKDiagnostics = ArmIKRetargeter.apply(to: model, frame: snapshot, convention: driver.convention)
+        } else {
+            lastArmIKDiagnostics = []
+        }
 
         // Disable procedural LookAt while VMC is driving eyes/head so it never overwrites VMC eye bones
         if renderer.lookAtController?.enabled == true {
@@ -208,9 +217,16 @@ final class VMCTrackingController {
     func applyBonesOnly(to model: VRMModel) -> Bool {
         guard isListening else { return false }
         let applied = driver.apply(to: model, controller: nil)
-        if applied && !isReceivingFrames {
-            isReceivingFrames = true
-            onStatusChanged?()
+        if applied {
+            if enablesProportionalArmIK {
+                lastArmIKDiagnostics = ArmIKRetargeter.apply(to: model, frame: driver.frame, convention: driver.convention)
+            } else {
+                lastArmIKDiagnostics = []
+            }
+            if !isReceivingFrames {
+                isReceivingFrames = true
+                onStatusChanged?()
+            }
         }
         return applied
     }

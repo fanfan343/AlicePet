@@ -175,6 +175,12 @@ class ArdyMiniEngine:
         self.graphs = self.manifest["graphs"]
 
         self.joint_names: list[str] = self.manifest["skeleton"]["joint_names"]
+        self.joint_parents: list[int] = list(self.manifest["skeleton"]["parents"])
+        self.neutral_joints = np.asarray(self.manifest["skeleton"]["neutral_joints"], dtype=np.float32)
+        self.bone_offsets = np.zeros_like(self.neutral_joints)
+        for j, p in enumerate(self.joint_parents):
+            if p >= 0:
+                self.bone_offsets[j] = self.neutral_joints[j] - self.neutral_joints[p]
         self.joint_index = {name: i for i, name in enumerate(self.joint_names)}
         self.retarget_plan: list[tuple[int, str, int | None]] = []
         for src, vmc_name, parent_src in CSKEL27_TO_VMC_BINDINGS:
@@ -298,7 +304,7 @@ class ArdyMiniEngine:
 
         return np.array([global_trans[0] + cx, global_trans[1], global_trans[2] + cz], dtype=np.float32)
 
-    def generate_window(self, prompt: str, cfg_weight: float = 2.5) -> tuple[list[dict[str, tuple[float, float, float, float]]], dict[str, float]]:
+    def generate_window(self, prompt: str, cfg_weight: float = 2.5) -> tuple[list[dict[str, tuple[np.ndarray, np.ndarray]]], dict[str, float]]:
         """Generates one 40-frame (2.0s at 20 FPS) autoregressive chunk and returns retargeted VRM bone quaternions."""
         dims = self.dims
         fpt = dims["num_frames_per_token"]
@@ -404,19 +410,28 @@ class ArdyMiniEngine:
         self.frame_count += gen_frames
 
         # Retarget 40 generated frames from cskel27 global 3x3 rotations -> VRM 1.0 local bone quaternions
-        vrm_frames: list[dict[str, np.ndarray]] = []
+        # PLUS source 3D world joint positions (Hips-relative, meters) so AlicePet's proportional 2-Bone Arm IK
+        # can adapt wide-shoulder human poses to narrow-shoulder anime VRMs without crossed arms or clipping.
+        vrm_frames: list[dict[str, tuple[np.ndarray, np.ndarray]]] = []
+        n_joints = len(self.joint_names)
         for f_off in range(gen_frames):
             f_idx = hist_frames + f_off
             mats = global_rots[f_idx]  # (27, 3, 3)
-            g_quats = [mat3_to_quat(mats[j]) for j in range(len(self.joint_names))]
-            frame_bones: dict[str, np.ndarray] = {}
+            g_quats = [mat3_to_quat(mats[j]) for j in range(n_joints)]
+            # Forward kinematics in cskel27 world space (Hips anchored at origin)
+            g_pos = np.zeros((n_joints, 3), dtype=np.float32)
+            for j in range(n_joints):
+                p = self.joint_parents[j]
+                if p >= 0:
+                    g_pos[j] = g_pos[p] + (mats[p] @ self.bone_offsets[j])
+            frame_bones: dict[str, tuple[np.ndarray, np.ndarray]] = {}
             for src_idx, vmc_name, parent_idx in self.retarget_plan:
                 g_q = g_quats[src_idx]
                 if parent_idx is None:
                     local_q = g_q
                 else:
                     local_q = quat_mul(quat_inv(g_quats[parent_idx]), g_q)
-                frame_bones[vmc_name] = local_q
+                frame_bones[vmc_name] = (local_q, g_pos[src_idx].copy())
             vrm_frames.append(frame_bones)
 
         timings = {
@@ -428,7 +443,7 @@ class ArdyMiniEngine:
         return vrm_frames, timings
 
 
-def build_vmc_pose_bundle(bones_vrm: dict[str, np.ndarray], timestamp_s: float) -> bytes:
+def build_vmc_pose_bundle(bones_vrm: dict[str, tuple[np.ndarray, np.ndarray]], timestamp_s: float) -> bytes:
     bundle = OscBundleBuilder(IMMEDIATELY)
 
     ok_msg = OscMessageBuilder(address="/VMC/Ext/OK")
@@ -439,13 +454,15 @@ def build_vmc_pose_bundle(bones_vrm: dict[str, np.ndarray], timestamp_s: float) 
     t_msg.add_arg(float(timestamp_s))
     bundle.add_content(t_msg.build())
 
-    for bone_name, q_vrm in bones_vrm.items():
+    for bone_name, (q_vrm, p_vrm) in bones_vrm.items():
         qx, qy, qz, qw = vrm_to_unity_quat(q_vrm)
+        # Convert VRM 1.0 right-handed position (+X Left) -> Unity VMC (.flipX inverse: -X, +Y, +Z)
+        px, py, pz = float(-p_vrm[0]), float(p_vrm[1]), float(p_vrm[2])
         msg = OscMessageBuilder(address="/VMC/Ext/Bone/Pos")
         msg.add_arg(bone_name)
-        msg.add_arg(0.0)
-        msg.add_arg(0.0)
-        msg.add_arg(0.0)
+        msg.add_arg(px)
+        msg.add_arg(py)
+        msg.add_arg(pz)
         msg.add_arg(qx)
         msg.add_arg(qy)
         msg.add_arg(qz)
@@ -524,7 +541,7 @@ def main() -> int:
         flush=True,
     )
 
-    frame_queue: collections.deque[dict[str, np.ndarray]] = collections.deque()
+    frame_queue: collections.deque[dict[str, tuple[np.ndarray, np.ndarray]]] = collections.deque()
     queue_lock = threading.Lock()
 
     def _generator_loop() -> None:
@@ -563,8 +580,8 @@ def main() -> int:
     send_fps = 60.0
     period = 1.0 / send_fps
     substeps = 3  # 20 FPS source -> 60 FPS SLERP playback
-    cur_frame: dict[str, np.ndarray] | None = None
-    next_frame: dict[str, np.ndarray] | None = None
+    cur_frame: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+    next_frame: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
     sub_idx = 0
     packets_sent = 0
 
@@ -585,7 +602,10 @@ def main() -> int:
                 if next_frame is not None:
                     alpha = min(1.0, sub_idx / float(substeps))
                     blended = {
-                        k: quat_slerp(cur_frame[k], next_frame[k], alpha)
+                        k: (
+                            quat_slerp(cur_frame[k][0], next_frame[k][0], alpha),
+                            ((1.0 - alpha) * cur_frame[k][1] + alpha * next_frame[k][1]).astype(np.float32),
+                        )
                         for k in cur_frame
                         if k in next_frame
                     }
