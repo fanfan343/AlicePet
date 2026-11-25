@@ -376,6 +376,7 @@ final class PetController: NSObject, MTKViewDelegate {
     @discardableResult
     func startAudioFaceTest(audioURL: URL? = nil, port: UInt16 = VMCTrackingController.defaultPort, maxSeconds: Double = 0) -> Bool {
         localMotionService.stop()
+        localAudioFaceService.suppressHeadMotion = localArdyActive
         if !vmcActive || vmcController.port != port {
             guard startVMC(port: port) else { return false }
         }
@@ -396,11 +397,13 @@ final class PetController: NSObject, MTKViewDelegate {
     @discardableResult
     func startArdyMotionTest(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
         localMotionService.stop()
+        localAudioFaceService.setHeadMotionSuppressed(true)
         if !vmcActive || vmcController.port != port {
             guard startVMC(port: port) else { return false }
         }
         let ok = localArdyService.start(port: vmcController.port)
         if !ok && !localAudioFaceActive {
+            localAudioFaceService.setHeadMotionSuppressed(false)
             stopVMC()
         }
         return ok
@@ -408,6 +411,7 @@ final class PetController: NSObject, MTKViewDelegate {
 
     func stopArdyMotionTest() {
         localArdyService.stop()
+        localAudioFaceService.setHeadMotionSuppressed(false)
         if !localAudioFaceActive && !localMotionActive {
             stopVMC()
         }
