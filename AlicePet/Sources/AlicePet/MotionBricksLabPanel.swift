@@ -76,7 +76,9 @@ final class MotionBricksLabPanel: NSObject {
             [.strafeLeft, .strafeRight, .crouch],
         ]
         for rowItems in locoRows {
-            root.addArrangedSubview(makePresetRow(rowItems, parentWidthAnchor: root.widthAnchor))
+            let row = makePresetRow(rowItems)
+            root.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
         }
 
         let styleTitle = NSTextField(labelWithString: "6 种官方风格变体 (Style Variations)")
@@ -89,7 +91,9 @@ final class MotionBricksLabPanel: NSObject {
             [.zombie, .injuredTorso, .injuredLeg],
         ]
         for rowItems in styleRows {
-            root.addArrangedSubview(makePresetRow(rowItems, parentWidthAnchor: root.widthAnchor))
+            let row = makePresetRow(rowItems)
+            root.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
         }
 
         faceCameraCheckbox.font = .systemFont(ofSize: 11.5)
@@ -124,7 +128,7 @@ final class MotionBricksLabPanel: NSObject {
         ])
     }
 
-    private func makePresetRow(_ presets: [MotionBricksPreset], parentWidthAnchor: NSLayoutDimension) -> NSStackView {
+    private func makePresetRow(_ presets: [MotionBricksPreset]) -> NSStackView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.distribution = .fillEqually
@@ -136,7 +140,6 @@ final class MotionBricksLabPanel: NSObject {
             presetButtons[preset] = btn
             row.addArrangedSubview(btn)
         }
-        row.widthAnchor.constraint(equalTo: parentWidthAnchor, constant: -32).isActive = true
         return row
     }
 
