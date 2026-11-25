@@ -31,7 +31,6 @@ final class PetController: NSObject, MTKViewDelegate {
     let localMotionService = LocalMotionService()
     let localAudioFaceService = LocalAudioFaceService()
     let localArdyService = LocalArdyService()
-    let localMotionBricksService = LocalMotionBricksService()
 
     private(set) var model: VRMModel?
     private(set) var loadedModelURL: URL?
@@ -78,7 +77,6 @@ final class PetController: NSObject, MTKViewDelegate {
     var localMotionActive: Bool { localMotionService.isRunning }
     var localAudioFaceActive: Bool { localAudioFaceService.isRunning }
     var localArdyActive: Bool { localArdyService.isRunning }
-    var localMotionBricksActive: Bool { localMotionBricksService.isRunning }
     var onVMCStatusChanged: (() -> Void)?
     var onVMCError: ((String) -> Void)?
 
@@ -124,9 +122,6 @@ final class PetController: NSObject, MTKViewDelegate {
         animationMixer.ardyChannel.onStatusChanged = { [weak self] in
             self?.onVMCStatusChanged?()
         }
-        animationMixer.motionBricksChannel.onStatusChanged = { [weak self] in
-            self?.onVMCStatusChanged?()
-        }
         animationMixer.audioFaceChannel.onStatusChanged = { [weak self] in
             self?.onVMCStatusChanged?()
         }
@@ -153,13 +148,6 @@ final class PetController: NSObject, MTKViewDelegate {
         }
         localArdyService.onError = { [weak self] msg in
             self?.stopArdyMotionTest()
-            self?.onVMCError?(msg)
-        }
-        localMotionBricksService.onStateChanged = { [weak self] in
-            self?.onVMCStatusChanged?()
-        }
-        localMotionBricksService.onError = { [weak self] msg in
-            self?.stopMotionBricksTest()
             self?.onVMCError?(msg)
         }
     }
@@ -372,7 +360,7 @@ final class PetController: NSObject, MTKViewDelegate {
         if wasActive && !animationMixer.isFaceCaptured {
             expressionMixer.resetAfterTrackingStop(on: renderer)
         }
-        if wasActive && !localArdyActive && !localMotionBricksActive {
+        if wasActive && !localArdyActive {
             applyAllBodyAndOutfitState(settlePhysics: false)
         }
     }
@@ -420,10 +408,6 @@ final class PetController: NSObject, MTKViewDelegate {
 
     @discardableResult
     func startArdyMotionTest() -> Bool {
-        // Only one AI full-body generator runs at a time; AnimationMixer SLERP-crossfades smoothly between them.
-        if localMotionBricksActive {
-            stopMotionBricksTest()
-        }
         if !animationMixer.ardyChannel.isListening {
             guard animationMixer.ardyChannel.start(port: 0) else { return false }
         }
@@ -441,33 +425,10 @@ final class PetController: NSObject, MTKViewDelegate {
         animationMixer.ardyChannel.stop()
     }
 
-    @discardableResult
-    func startMotionBricksTest() -> Bool {
-        if localArdyActive {
-            stopArdyMotionTest()
-        }
-        if !animationMixer.motionBricksChannel.isListening {
-            guard animationMixer.motionBricksChannel.start(port: 0) else { return false }
-        }
-        guard let boundPort = animationMixer.motionBricksChannel.boundPort else { return false }
-        animationMixer.preferredFullBodySource = .motionBricks
-        let ok = localMotionBricksService.start(port: boundPort)
-        if !ok {
-            animationMixer.motionBricksChannel.stop()
-        }
-        return ok
-    }
-
-    func stopMotionBricksTest() {
-        localMotionBricksService.stop()
-        animationMixer.motionBricksChannel.stop()
-    }
-
     func stopAllTrackingSync() {
         localMotionService.stopSync()
         localAudioFaceService.stopSync()
         localArdyService.stopSync()
-        localMotionBricksService.stopSync()
         animationMixer.stopAllChannels()
     }
 

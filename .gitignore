@@ -28,12 +28,6 @@ services/**/*.onnx
 services/**/*.onnx.data
 services/**/*.m4a
 services/ardy/models/
-services/motionbricks/upstream/
-services/motionbricks/models/
-services/**/*.usd
-services/**/*.usdc
-services/**/*.npz
-services/**/*.bvh
 services/**/*.pt
 services/**/*.ckpt
 services/**/*.task

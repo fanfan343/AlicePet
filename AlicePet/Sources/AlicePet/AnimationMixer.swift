@@ -7,7 +7,7 @@ import simd
 ///
 /// Replaces single-port flat VMC overwrites with isolated per-engine UDP channels and
 /// three deterministic compositing layers evaluated every frame:
-///   - Layer 0 (Base Full-Body): Exclusive winner among MotionBricks / ARDY / External VMC / Author Pose
+///   - Layer 0 (Base Full-Body): Exclusive winner among ARDY / External VMC / Author Pose
 ///     with smoothstep 0.35s SLERP crossfading on every source switch.
 ///   - Layer 1 (Additive Speech Micro-Motion): Composes LAM Audio2Expression Neck/Head nods additively
 ///     on top of ANY active full-body base layer without fighting or overwriting body orientation.
@@ -19,14 +19,12 @@ final class AnimationMixer {
         case authorPose = "AuthorPose"
         case externalVMC = "ExternalVMC"
         case ardy = "ARDY"
-        case motionBricks = "MotionBricks"
 
         var displayLabel: String {
             switch self {
             case .authorPose: return "作者姿态"
             case .externalVMC: return "外部/精捕 VMC"
             case .ardy: return "ARDY Mini"
-            case .motionBricks: return "MotionBricks"
             }
         }
     }
@@ -40,7 +38,6 @@ final class AnimationMixer {
     /// Isolated UDP channels so concurrent AI engines never contend over a single VMC port.
     let externalChannel = VMCTrackingController()
     let ardyChannel = VMCTrackingController()
-    let motionBricksChannel = VMCTrackingController()
     let audioFaceChannel = VMCTrackingController()
 
     /// Additive blend weight for LAM speech head nods when layered over an AI/VMC full-body base.
@@ -72,14 +69,12 @@ final class AnimationMixer {
     var isAnyStreamReceiving: Bool {
         externalChannel.hasFreshFrame
             || ardyChannel.hasFreshFrame
-            || motionBricksChannel.hasFreshFrame
             || audioFaceChannel.hasFreshFrame
     }
 
     init() {
         // Internal AI body engines keep hips anchored by default so Alice never walks off the desktop window
         ardyChannel.appliesHipsPosition = false
-        motionBricksChannel.appliesHipsPosition = false
         audioFaceChannel.appliesHipsPosition = false
     }
 
@@ -96,7 +91,6 @@ final class AnimationMixer {
     func stopAllChannels(renderer: VRMRenderer? = nil, expressionMixer: ExpressionMixer? = nil) {
         externalChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
         ardyChannel.stop()
-        motionBricksChannel.stop()
         audioFaceChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
         resetCrossfadeState()
     }
@@ -143,10 +137,6 @@ final class AnimationMixer {
             poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
             poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
             _ = ardyChannel.applyBonesOnly(to: model)
-        case .motionBricks:
-            poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
-            poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
-            _ = motionBricksChannel.applyBonesOnly(to: model)
         }
 
         // Smoothstep SLERP crossfade between previous Layer 0 pose and incoming Layer 0 pose
@@ -222,20 +212,17 @@ final class AnimationMixer {
     }
 
     private func resolveActiveBodySource() -> BodyLayerSource {
-        let hasMB = motionBricksChannel.hasFreshFrame && motionBricksChannel.receivedBoneCount > 0
         let hasArdy = ardyChannel.hasFreshFrame && ardyChannel.receivedBoneCount > 0
         let hasExt = externalChannel.hasFreshFrame && externalChannel.receivedBoneCount > 0
 
         if let preferred = preferredFullBodySource {
             switch preferred {
-            case .motionBricks where hasMB: return .motionBricks
             case .ardy where hasArdy: return .ardy
             case .externalVMC where hasExt: return .externalVMC
             default: break
             }
         }
 
-        if hasMB { return .motionBricks }
         if hasArdy { return .ardy }
         if hasExt { return .externalVMC }
         return .authorPose

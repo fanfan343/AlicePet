@@ -33,9 +33,8 @@ let vmcLoopbackPath = parseArg("--test-vmc-loopback")
 let motionServiceTestPath = parseArg("--test-motion-service")
 let audioFaceTestPath = parseArg("--test-audio2face")
 let ardyTestPath = parseArg("--test-ardy")
-let motionBricksTestPath = parseArg("--test-motionbricks")
 let mixerTestPath = parseArg("--test-mixer")
-let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil) || (motionServiceTestPath != nil) || (audioFaceTestPath != nil) || (ardyTestPath != nil) || (motionBricksTestPath != nil) || (mixerTestPath != nil)
+let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil) || (motionServiceTestPath != nil) || (audioFaceTestPath != nil) || (ardyTestPath != nil) || (mixerTestPath != nil)
 let modelURL = resolveInitialModelURL(isHeadlessSnapshot: isSnapshotMode)
 
 func sendLoopbackUDP(_ data: Data, toPort port: UInt16) throws {
@@ -314,79 +313,16 @@ if let ardyOutputPath = ardyTestPath {
                 expressionMixer: controller.expressionMixer
             )
             controller.settleSpringBonePhysics(warmupSteps: 16)
-            print("ARDY E2E OK: port=\(boundPort) packets=\(controller.vmcController.packetCount) bones=\(controller.vmcController.receivedBoneCount) applied=\(applied)")
+            let ikSummary = controller.vmcController.lastArmIKDiagnostics
+                .map { "\($0.side):shift=\(String(format: "%.1f", $0.targetShiftCm))cm,clip=\($0.clippedAdjusted)" }
+                .joined(separator: ",")
+            print("ARDY E2E OK: port=\(boundPort) packets=\(controller.vmcController.packetCount) bones=\(controller.vmcController.receivedBoneCount) applied=\(applied) armIK=[\(ikSummary)]")
 
             try await controller.renderSnapshot(to: URL(fileURLWithPath: ardyOutputPath), applyBaseState: false)
             print("ARDY E2E snapshot saved to \(ardyOutputPath)")
             controller.stopAllTrackingSync()
         } catch {
             fputs("ARDY E2E error: \(error)\n", stderr)
-            exitCode = 1
-        }
-        done = true
-    }
-    while !done {
-        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
-    }
-    exit(exitCode)
-}
-
-if let mbOutputPath = motionBricksTestPath {
-    var done = false
-    var exitCode: Int32 = 0
-    Task { @MainActor in
-        do {
-            let controller = try PetController(sampleCount: 1)
-            try await controller.loadModel(from: modelURL, synchronousPhysics: true)
-            controller.camera.apply(preset: .fullBody)
-
-            guard controller.animationMixer.motionBricksChannel.start(port: 0),
-                  let boundPort = controller.animationMixer.motionBricksChannel.boundPort else {
-                throw NSError(domain: "AlicePet.MotionBricks", code: 50, userInfo: [NSLocalizedDescriptionKey: "Failed to bind MotionBricks VMC port"])
-            }
-            guard let serviceDir = LocalMotionBricksService.resolveServiceDirectory() else {
-                throw NSError(domain: "AlicePet.MotionBricks", code: 51, userInfo: [NSLocalizedDescriptionKey: "services/motionbricks directory not found"])
-            }
-            let preset = parseArg("--preset") ?? "skipping"
-            let proc = Process()
-            proc.executableURL = serviceDir.appendingPathComponent(".venv/bin/python")
-            proc.currentDirectoryURL = serviceDir
-            proc.arguments = ["motionbricks_vmc.py", "--self-test", "--preset", preset, "--host", "127.0.0.1", "--port", String(boundPort)]
-            proc.standardInput = FileHandle.nullDevice
-            try proc.run()
-
-            let deadline = Date().addingTimeInterval(60.0)
-            while (controller.animationMixer.motionBricksChannel.packetCount == 0 || proc.isRunning) && Date() < deadline {
-                try await Task.sleep(nanoseconds: 50_000_000)
-            }
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0,
-                  controller.animationMixer.motionBricksChannel.packetCount > 0,
-                  let model = controller.model else {
-                throw NSError(domain: "AlicePet.MotionBricks", code: 52, userInfo: [NSLocalizedDescriptionKey: "MotionBricks self-test failed (status=\(proc.terminationStatus), packets=\(controller.animationMixer.motionBricksChannel.packetCount))"])
-            }
-
-            controller.animationMixer.preferredFullBodySource = .motionBricks
-            controller.animationMixer.evaluate(
-                model: model,
-                renderer: controller.renderer,
-                poseController: controller.poseController,
-                recipeStore: controller.recipeStore,
-                expressionMixer: controller.expressionMixer,
-                elapsed: 0.5,
-                dt: 0.5,
-                idleBreathingEnabled: true,
-                poseMode: controller.poseMode,
-                window: nil
-            )
-            controller.settleSpringBonePhysics(warmupSteps: 16)
-            print("MotionBricks E2E OK: preset=\(preset) port=\(boundPort) packets=\(controller.animationMixer.motionBricksChannel.packetCount) bones=\(controller.animationMixer.motionBricksChannel.receivedBoneCount) activeBody=\(controller.animationMixer.activeBodySource.rawValue)")
-
-            try await controller.renderSnapshot(to: URL(fileURLWithPath: mbOutputPath), applyBaseState: false)
-            print("MotionBricks E2E snapshot saved to \(mbOutputPath)")
-            controller.stopAllTrackingSync()
-        } catch {
-            fputs("MotionBricks E2E error: \(error)\n", stderr)
             exitCode = 1
         }
         done = true
@@ -406,24 +342,25 @@ if let mixerOutputPath = mixerTestPath {
             try await controller.loadModel(from: modelURL, synchronousPhysics: true)
             controller.camera.apply(preset: .upperBody)
 
-            guard controller.animationMixer.motionBricksChannel.start(port: 0),
-                  let mbPort = controller.animationMixer.motionBricksChannel.boundPort,
+            guard controller.animationMixer.ardyChannel.start(port: 0),
+                  let ardyPort = controller.animationMixer.ardyChannel.boundPort,
                   controller.animationMixer.audioFaceChannel.start(port: 0),
                   let facePort = controller.animationMixer.audioFaceChannel.boundPort else {
                 throw NSError(domain: "AlicePet.Mixer", code: 60, userInfo: [NSLocalizedDescriptionKey: "Failed to bind isolated mixer ports"])
             }
-            controller.animationMixer.motionBricksChannel.driver.maxAge = 15.0
+            controller.animationMixer.ardyChannel.driver.maxAge = 15.0
             controller.animationMixer.audioFaceChannel.driver.maxAge = 15.0
-            guard let mbDir = LocalMotionBricksService.resolveServiceDirectory(),
+            guard let ardyDir = LocalArdyService.resolveServiceDirectory(),
                   let ttsDir = LocalAudioFaceService.resolveServiceDirectory() else {
                 throw NSError(domain: "AlicePet.Mixer", code: 61, userInfo: [NSLocalizedDescriptionKey: "Service directories not found"])
             }
 
-            let mbProc = Process()
-            mbProc.executableURL = mbDir.appendingPathComponent(".venv/bin/python")
-            mbProc.currentDirectoryURL = mbDir
-            mbProc.arguments = ["motionbricks_vmc.py", "--self-test", "--preset", "vogue", "--host", "127.0.0.1", "--port", String(mbPort)]
-            mbProc.standardInput = FileHandle.nullDevice
+            let prompt = parseArg("--prompt") ?? "a person claps hands enthusiastically"
+            let ardyProc = Process()
+            ardyProc.executableURL = ardyDir.appendingPathComponent(".venv/bin/python")
+            ardyProc.currentDirectoryURL = ardyDir
+            ardyProc.arguments = ["ardy_vmc.py", "--self-test", "--prompt", prompt, "--host", "127.0.0.1", "--port", String(ardyPort)]
+            ardyProc.standardInput = FileHandle.nullDevice
 
             let faceProc = Process()
             faceProc.executableURL = ttsDir.appendingPathComponent(".venv/bin/python")
@@ -434,26 +371,25 @@ if let mixerOutputPath = mixerTestPath {
             faceProc.environment = env
             faceProc.standardInput = FileHandle.nullDevice
 
-            try mbProc.run()
+            try ardyProc.run()
             try faceProc.run()
 
             let deadline = Date().addingTimeInterval(60.0)
-            while (mbProc.isRunning || faceProc.isRunning) && Date() < deadline {
+            while (ardyProc.isRunning || faceProc.isRunning) && Date() < deadline {
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
-            mbProc.waitUntilExit()
+            ardyProc.waitUntilExit()
             faceProc.waitUntilExit()
 
-            guard mbProc.terminationStatus == 0,
+            guard ardyProc.terminationStatus == 0,
                   faceProc.terminationStatus == 0,
-                  controller.animationMixer.motionBricksChannel.packetCount > 0,
+                  controller.animationMixer.ardyChannel.packetCount > 0,
                   controller.animationMixer.audioFaceChannel.packetCount > 0,
                   let model = controller.model else {
-                throw NSError(domain: "AlicePet.Mixer", code: 62, userInfo: [NSLocalizedDescriptionKey: "Mixer concurrent self-test failed (mb=\(mbProc.terminationStatus), face=\(faceProc.terminationStatus))"])
+                throw NSError(domain: "AlicePet.Mixer", code: 62, userInfo: [NSLocalizedDescriptionKey: "Mixer concurrent self-test failed (ardy=\(ardyProc.terminationStatus), face=\(faceProc.terminationStatus))"])
             }
 
-            controller.animationMixer.preferredFullBodySource = .motionBricks
-            // Evaluate with full 3-layer compositing: Layer 0 MotionBricks + Layer 1 LAM Additive Head + Layer 2 LAM 52 ARKit Face
+            controller.animationMixer.preferredFullBodySource = .ardy
             controller.animationMixer.evaluate(
                 model: model,
                 renderer: controller.renderer,
@@ -466,8 +402,11 @@ if let mixerOutputPath = mixerTestPath {
                 poseMode: controller.poseMode,
                 window: nil
             )
-            controller.settleSpringBonePhysics(warmupSteps: 16)
-            print("Mixer E2E OK: bodyPort=\(mbPort)(bones=\(controller.animationMixer.motionBricksChannel.receivedBoneCount)) facePort=\(facePort)(bones=\(controller.animationMixer.audioFaceChannel.receivedBoneCount), shapes=\(controller.animationMixer.audioFaceChannel.receivedBlendShapeCount)) activeBody=\(controller.animationMixer.activeBodySource.rawValue) activeFace=\(controller.animationMixer.activeFaceSource.rawValue)")
+            controller.settleSpringBonePhysics(warmupSteps: 24)
+            let ikSummary = controller.animationMixer.ardyChannel.lastArmIKDiagnostics
+                .map { "\($0.side):shift=\(String(format: "%.1f", $0.targetShiftCm))cm,clip=\($0.clippedAdjusted)" }
+                .joined(separator: ",")
+            print("Mixer E2E OK: bodyPort=\(ardyPort)(bones=\(controller.animationMixer.ardyChannel.receivedBoneCount)) facePort=\(facePort)(bones=\(controller.animationMixer.audioFaceChannel.receivedBoneCount), shapes=\(controller.animationMixer.audioFaceChannel.receivedBlendShapeCount)) activeBody=\(controller.animationMixer.activeBodySource.rawValue) activeFace=\(controller.animationMixer.activeFaceSource.rawValue) armIK=[\(ikSummary)]")
 
             try await controller.renderSnapshot(to: URL(fileURLWithPath: mixerOutputPath), applyBaseState: false)
             print("Mixer E2E snapshot saved to \(mixerOutputPath)")

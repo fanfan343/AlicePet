@@ -18,10 +18,10 @@
 - [ ] 动态帧率省电策略（互动 60fps / 静止待机 24–30fps / 被遮挡降频或休眠）
 - [ ] 接入 1–2 个非 Alice 的通用 VRM 模型验证跨模型兼容性
 
-## Stage 3：动作系统深化（分层混合器 + ARDY Mini + MotionBricks）
+## Stage 3：动作系统深化（分层混合器 + ARDY Mini）
 - [x] 定义统一的 `MotionSource` 协议，并实现原版 Unity Humanoid 肌肉动画提取器（`tools/extract_alice_animations.py`）与实时重定向播放器（`UnityMuscleRetargeter` + `AuthorAnimationPlayer`），还原作者原版 Stand / Sit / Crouch / Prone / 16.67s AFK 循环动作
 - [x] 实现三层动画混合器 `AnimationMixer`（独立 VMC 通道隔离 + Layer 0 全身 0.35s SLERP Crossfade 过渡 + Layer 1 语音头部微动四元数叠加 + Layer 2 52 通道面部与眨眼/视线解耦）
-- [x] 在「测试功能 (Lab)」中以独立本地子服务方式接入 **ARDY Mini**（`services/ardy/`，文本驱动 20fps 自回归全身动作）与 **NVIDIA MotionBricks SOMA**（`services/motionbricks/`，~30ms 实时运动与 6 种风格过渡）
+- [x] 在「测试功能 (Lab)」中以独立本地子服务方式接入 **ARDY Mini**（`services/ardy/`，文本驱动 20fps 自回归全身动作）与通用双臂比例 2-Bone IK / 防穿模保护
 - [ ] 支持加载播放标准 `.vrma` 动画文件
 
 ## Stage 4：面捕与上半身捕捉进阶
