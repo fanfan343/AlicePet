@@ -5,11 +5,12 @@ import Foundation
 /// (LAM_Audio2Expression INT8 ONNX -> 52-channel ARKit VMC/OSC synchronized audio playback).
 @MainActor
 final class LocalAudioFaceService {
-    var headMotionEnabled: Bool = true
+    var params: AudioLipSyncParams = AudioLipSyncParams.loadFromDefaults()
     private(set) var isRunning: Bool = false
     private(set) var activeAudioName: String?
 
     private var process: Process?
+    private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var launchGeneration: UInt64 = 0
@@ -82,7 +83,17 @@ final class LocalAudioFaceService {
             "--model", modelURL.path,
             "--host", "127.0.0.1",
             "--port", String(port),
-            "--head-motion", headMotionEnabled ? "1" : "0",
+            "--jaw-gain", String(format: "%.3f", params.jawGain),
+            "--vowel-gain", String(format: "%.3f", params.vowelGain),
+            "--lip-close", String(format: "%.3f", params.lipCloseStrength),
+            "--lip-reveal", String(format: "%.3f", params.lipRevealGain),
+            "--smoothing", String(format: "%.3f", params.smoothing),
+            "--upper-face", String(format: "%.3f", params.upperFaceGain),
+            "--head-motion", String(format: "%.3f", params.headMotionGain),
+            "--sync-offset-ms", String(format: "%.1f", params.syncOffsetMs),
+            "--natural-blinks", params.naturalBlinks ? "1" : "0",
+            "--loop", params.loopPlayback ? "1" : "0",
+            "--live-params",
         ]
         if maxSeconds > 0 {
             args += ["--max-seconds", String(format: "%.1f", maxSeconds)]
@@ -94,9 +105,10 @@ final class LocalAudioFaceService {
         env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
         proc.environment = env
 
+        let inPipe = Pipe()
         let outPipe = Pipe()
         let errPipe = Pipe()
-        proc.standardInput = FileHandle.nullDevice
+        proc.standardInput = inPipe
         proc.standardOutput = outPipe
         proc.standardError = errPipe
 
@@ -146,11 +158,12 @@ final class LocalAudioFaceService {
         do {
             try proc.run()
             self.process = proc
+            self.stdinPipe = inPipe
             self.stdoutPipe = outPipe
             self.stderrPipe = errPipe
             self.isRunning = true
             self.activeAudioName = targetAudio.lastPathComponent
-            AppLogger.shared.info("Audio2Face", "Started LAM 52-channel audio test: \(targetAudio.lastPathComponent) (pid=\(proc.processIdentifier), port=\(port))")
+            AppLogger.shared.info("Audio2Face", "Started LAM 52-channel audio test: \(targetAudio.lastPathComponent) (pid=\(proc.processIdentifier), port=\(port), \(params.prettyRecipeSummary()))")
             onStateChanged?()
             return true
         } catch {
@@ -160,6 +173,13 @@ final class LocalAudioFaceService {
             onError?(msg)
             return false
         }
+    }
+
+    func pushLiveParams(_ newParams: AudioLipSyncParams) {
+        self.params = newParams
+        guard isRunning, let handle = stdinPipe?.fileHandleForWriting,
+              let line = newParams.toLiveJSONLine() else { return }
+        try? handle.write(contentsOf: line)
     }
 
     func stop() {
@@ -207,6 +227,8 @@ final class LocalAudioFaceService {
     }
 
     private func cleanupHandles() {
+        try? stdinPipe?.fileHandleForWriting.close()
+        stdinPipe = nil
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil

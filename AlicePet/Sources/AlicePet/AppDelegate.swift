@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var mtkView: PetMetalView!
     private var controller: PetController!
     private var statusItem: NSStatusItem!
+    private var lipSyncTuningPanel: AudioLipSyncTuningPanel?
 
     private var isClickThrough: Bool = false
     private var isAlwaysOnTop: Bool = true
@@ -133,8 +134,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         controller.onVMCStatusChanged = { [weak self] in
-            self?.updateStatusBarTitle()
-            self?.refreshMenus()
+            guard let self else { return }
+            self.updateStatusBarTitle()
+            self.lipSyncTuningPanel?.setPlayingState(
+                self.controller.localAudioFaceActive,
+                audioName: self.controller.localAudioFaceService.activeAudioName
+            )
+            self.refreshMenus()
         }
         controller.onVMCError = { [weak self] message in
             self?.updateStatusBarTitle()
@@ -532,6 +538,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Experimental / Lab Features Submenu (tests live here until promoted to main menu)
         let labMenu = NSMenu()
+        let openTuningItem = NSMenuItem(title: "打开口型与表情实时调参面板…", action: #selector(openLabLipSyncTuningPanel), keyEquivalent: "")
+        openTuningItem.target = self
+        labMenu.addItem(openTuningItem)
+        labMenu.addItem(.separator())
+
         let audioTestTitle = controller.localAudioFaceActive
             ? "停止音频对口型测试 (\(controller.localAudioFaceService.activeAudioName ?? "播放中"))"
             : "播放 10s VTuber 语音对口型测试 (LAM 52通道)"
@@ -543,11 +554,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let customAudioItem = NSMenuItem(title: "选择任意音频文件对口型测试…", action: #selector(pickCustomAudioForLabTest), keyEquivalent: "")
         customAudioItem.target = self
         labMenu.addItem(customAudioItem)
-
-        let headMotionItem = NSMenuItem(title: "说话时附带轻微点头微动作", action: #selector(toggleLabAudioHeadMotion), keyEquivalent: "")
-        headMotionItem.target = self
-        headMotionItem.state = controller.localAudioFaceService.headMotionEnabled ? .on : .off
-        labMenu.addItem(headMotionItem)
 
         labMenu.addItem(.separator())
         let labInfoItem = NSMenuItem(title: "引擎：LAM_Audio2Expression (INT8 ONNX · 52 通道)", action: nil, keyEquivalent: "")
@@ -673,6 +679,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([AppLogger.shared.logFileURL])
     }
 
+    @objc private func openLabLipSyncTuningPanel() {
+        if lipSyncTuningPanel == nil {
+            let panel = AudioLipSyncTuningPanel(initialParams: controller.localAudioFaceService.params)
+            panel.onParamsChanged = { [weak self] newParams in
+                self?.controller.localAudioFaceService.pushLiveParams(newParams)
+            }
+            panel.onTogglePlay = { [weak self] in
+                self?.toggleLabAudioFaceTest()
+            }
+            panel.onPickAudio = { [weak self] in
+                self?.pickCustomAudioForLabTest()
+            }
+            lipSyncTuningPanel = panel
+        }
+        lipSyncTuningPanel?.setPlayingState(
+            controller.localAudioFaceActive,
+            audioName: controller.localAudioFaceService.activeAudioName
+        )
+        lipSyncTuningPanel?.show()
+    }
+
     @objc private func toggleLabAudioFaceTest() {
         if controller.localAudioFaceActive {
             controller.stopAudioFaceTest()
@@ -680,6 +707,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = controller.startAudioFaceTest(audioURL: nil, port: preferredVMCPort)
         }
         updateStatusBarTitle()
+        lipSyncTuningPanel?.setPlayingState(
+            controller.localAudioFaceActive,
+            audioName: controller.localAudioFaceService.activeAudioName
+        )
         refreshMenus()
     }
 
@@ -694,13 +725,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel.runModal() == .OK, let url = panel.url {
             _ = controller.startAudioFaceTest(audioURL: url, port: preferredVMCPort, maxSeconds: 30.0)
             updateStatusBarTitle()
+            lipSyncTuningPanel?.setPlayingState(
+                controller.localAudioFaceActive,
+                audioName: controller.localAudioFaceService.activeAudioName
+            )
             refreshMenus()
         }
-    }
-
-    @objc private func toggleLabAudioHeadMotion() {
-        controller.localAudioFaceService.headMotionEnabled.toggle()
-        refreshMenus()
     }
 
     @objc private func selectPoseMode(_ sender: NSMenuItem) {
