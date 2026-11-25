@@ -76,6 +76,9 @@ final class PictureWorldRenderer {
     var avatarWorldYaw: Float = 0.0
     var depthBiasMeters: Float = 0.0
 
+    /// Anchor tracking for ARDY continuous 3D root locomotion inside the room.
+    private var lastARDYRootXZ: SIMD2<Float>?
+
     var isActive: Bool {
         config != nil && bgTexture != nil && depthTexture != nil
     }
@@ -148,6 +151,7 @@ final class PictureWorldRenderer {
         self.depthTexture = depthTex
         self.avatarWorldPosition = cfg.spawnPos
         self.avatarWorldYaw = cfg.avatarSpawnYawRad
+        self.lastARDYRootXZ = nil
 
         AppLogger.shared.info(
             "PictureWorld",
@@ -162,7 +166,88 @@ final class PictureWorldRenderer {
         depthTexture = nil
         avatarWorldPosition = .zero
         avatarWorldYaw = 0.0
+        lastARDYRootXZ = nil
         AppLogger.shared.info("PictureWorld", "Unloaded Picture-World scene (0 scene VRAM)")
+    }
+
+    func resetARDYRootTracking() {
+        lastARDYRootXZ = nil
+    }
+
+    /// Integrates continuous ARDY root XZ displacement (meters) onto the Picture-World floor while
+    /// enforcing BOTH the scene `walkBounds` and live camera-frustum visibility guard so Alice
+    /// genuinely walks around the 3D room without ever leaving the frame or clipping the camera lens.
+    func applyARDYRootMotion(worldRootXZ: SIMD2<Float>, viewportAspect: Float) {
+        guard isActive else { return }
+        guard let prev = lastARDYRootXZ else {
+            lastARDYRootXZ = worldRootXZ
+            return
+        }
+        let rawDelta = worldRootXZ - prev
+        lastARDYRootXZ = worldRootXZ
+
+        // Guard against single-frame stream restart teleports (>35cm in one frame)
+        let stepLen = simd_length(rawDelta)
+        guard stepLen > 0.0001 && stepLen < 0.35 else { return }
+
+        // Rotate ARDY delta by spawn yaw so footfalls match Alice's world facing direction
+        let cy = cos(avatarWorldYaw)
+        let sy = sin(avatarWorldYaw)
+        let dx = rawDelta.x * cy + rawDelta.y * sy
+        let dz = -rawDelta.x * sy + rawDelta.y * cy
+
+        let candidate = SIMD3<Float>(avatarWorldPosition.x + dx, 0.0, avatarWorldPosition.z + dz)
+        avatarWorldPosition = clampAvatarPositionToSafeRoom(candidate, viewportAspect: viewportAspect)
+    }
+
+    /// Clamps any world floor coordinate inside `walkBounds` AND inside the camera's visible frustum
+    /// (keeping a comfortable horizontal margin and >=1.55m clearance in front of the lens).
+    func clampAvatarPositionToSafeRoom(_ pos: SIMD3<Float>, viewportAspect: Float) -> SIMD3<Float> {
+        guard let cfg = config else { return pos }
+        var p = SIMD3<Float>(pos.x, 0.0, pos.z)
+
+        // 1. Scene floor walk bounds
+        if let minB = cfg.walkBoundsMin, minB.count == 2,
+           let maxB = cfg.walkBoundsMax, maxB.count == 2 {
+            p.x = min(max(p.x, minB[0]), maxB[0])
+            p.z = min(max(p.z, minB[1]), maxB[1])
+        }
+
+        // 2. Live camera frustum guard (projected onto floor plane)
+        guard let mats = cameraMatrices(viewportAspect: viewportAspect) else { return p }
+        let camPos = cfg.camPos
+        let fwd3 = simd_normalize(cfg.camTarget - camPos)
+        let right3 = simd_normalize(simd_cross(fwd3, cfg.camUp))
+        let fwdH = simd_normalize(SIMD2<Float>(fwd3.x, fwd3.z))
+        let rightH = simd_normalize(SIMD2<Float>(right3.x, right3.z))
+
+        let relH = SIMD2<Float>(p.x - camPos.x, p.z - camPos.z)
+        var depth = simd_dot(relH, fwdH)
+        var lateral = simd_dot(relH, rightH)
+
+        // Never walk closer than 1.55m to the camera lens (avoids head clipping off top of frame)
+        let minSafeDepth: Float = 1.55
+        if depth < minSafeDepth {
+            depth = minSafeDepth
+        }
+
+        // Keep full body well inside left/right screen edges (68% of half-frustum width at current depth)
+        let tanHalfY = tan(mats.effectiveFovYRad * 0.5)
+        let tanHalfX = tanHalfY * max(viewportAspect, 0.25)
+        let maxLateral = max(0.32, depth * tanHalfX * 0.68)
+        lateral = min(max(lateral, -maxLateral), maxLateral)
+
+        let clampedH = SIMD2<Float>(camPos.x, camPos.z) + fwdH * depth + rightH * lateral
+        p.x = clampedH.x
+        p.z = clampedH.y
+
+        // Re-apply room walk bounds after frustum projection
+        if let minB = cfg.walkBoundsMin, minB.count == 2,
+           let maxB = cfg.walkBoundsMax, maxB.count == 2 {
+            p.x = min(max(p.x, minB[0]), maxB[0])
+            p.z = min(max(p.z, minB[1]), maxB[1])
+        }
+        return p
     }
 
     /// Computes the exact camera view + projection matrices locked to `bg.png` + `depth.bin`

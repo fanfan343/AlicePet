@@ -410,12 +410,15 @@ class ArdyMiniEngine:
         self.frame_count += gen_frames
 
         # Retarget 40 generated frames from cskel27 global 3x3 rotations -> VRM 1.0 local bone quaternions
-        # PLUS source 3D world joint positions (Hips-relative, meters) so AlicePet's proportional 2-Bone Arm IK
-        # can adapt wide-shoulder human poses to narrow-shoulder anime VRMs without crossed arms or clipping.
-        vrm_frames: list[dict[str, tuple[np.ndarray, np.ndarray]]] = []
+        # PLUS source 3D world joint positions (Hips-relative, meters) for proportional 2-Bone Arm IK,
+        # AND continuous global root XZ translation (meters) for Picture-World room locomotion.
+        vrm_frames: list[tuple[dict[str, tuple[np.ndarray, np.ndarray]], np.ndarray]] = []
         n_joints = len(self.joint_names)
+        px_i, py_i, pz_i = self.recenter_cfg["position_indices"]
         for f_off in range(gen_frames):
             f_idx = hist_frames + f_off
+            raw_root = decoded_motion[f_idx, :r_dim] * self._root_std + self._root_mean
+            root_world = np.array([float(raw_root[px_i]), 0.0, float(raw_root[pz_i])], dtype=np.float32)
             mats = global_rots[f_idx]  # (27, 3, 3)
             g_quats = [mat3_to_quat(mats[j]) for j in range(n_joints)]
             # Forward kinematics in cskel27 world space (Hips anchored at origin)
@@ -432,7 +435,7 @@ class ArdyMiniEngine:
                 else:
                     local_q = quat_mul(quat_inv(g_quats[parent_idx]), g_q)
                 frame_bones[vmc_name] = (local_q, g_pos[src_idx].copy())
-            vrm_frames.append(frame_bones)
+            vrm_frames.append((frame_bones, root_world))
 
         timings = {
             "text_ms": text_ms,
@@ -443,7 +446,11 @@ class ArdyMiniEngine:
         return vrm_frames, timings
 
 
-def build_vmc_pose_bundle(bones_vrm: dict[str, tuple[np.ndarray, np.ndarray]], timestamp_s: float) -> bytes:
+def build_vmc_pose_bundle(
+    bones_vrm: dict[str, tuple[np.ndarray, np.ndarray]],
+    timestamp_s: float,
+    root_world_vrm: np.ndarray | None = None,
+) -> bytes:
     bundle = OscBundleBuilder(IMMEDIATELY)
 
     ok_msg = OscMessageBuilder(address="/VMC/Ext/OK")
@@ -453,6 +460,19 @@ def build_vmc_pose_bundle(bones_vrm: dict[str, tuple[np.ndarray, np.ndarray]], t
     t_msg = OscMessageBuilder(address="/VMC/Ext/T")
     t_msg.add_arg(float(timestamp_s))
     bundle.add_content(t_msg.build())
+
+    if root_world_vrm is not None:
+        r_msg = OscMessageBuilder(address="/VMC/Ext/Root/Pos")
+        r_msg.add_arg("root")
+        # Convert VRM 1.0 right-handed position (+X Left) -> Unity VMC (.flipX inverse: -X, +Y, +Z)
+        r_msg.add_arg(float(-root_world_vrm[0]))
+        r_msg.add_arg(float(root_world_vrm[1]))
+        r_msg.add_arg(float(root_world_vrm[2]))
+        r_msg.add_arg(0.0)
+        r_msg.add_arg(0.0)
+        r_msg.add_arg(0.0)
+        r_msg.add_arg(1.0)
+        bundle.add_content(r_msg.build())
 
     for bone_name, (q_vrm, p_vrm) in bones_vrm.items():
         qx, qy, qz, qw = vrm_to_unity_quat(q_vrm)
@@ -499,14 +519,15 @@ def main() -> int:
         frames, timings = engine.generate_window(args.prompt, cfg_weight=args.cfg)
         # Pick frame ~22 (mid-wave / mid-action) for visual snapshot inspection
         pick_idx = min(len(frames) - 1, 22)
-        dgram = build_vmc_pose_bundle(frames[pick_idx], pick_idx / 20.0)
+        pick_bones, pick_root = frames[pick_idx]
+        dgram = build_vmc_pose_bundle(pick_bones, pick_idx / 20.0, root_world_vrm=pick_root)
         sock.sendto(dgram, (args.host, args.port))
         sock.close()
         print(
             f"[ARDY] Self-test OK: load={engine.load_ms:.0f}ms text={timings['text_ms']:.0f}ms "
             f"denoise={timings['denoise_ms']:.0f}ms decode={timings['decode_ms']:.0f}ms "
-            f"total={timings['total_ms']:.0f}ms frames={len(frames)} bones={len(frames[pick_idx])} "
-            f"bytes={len(dgram)} prompt='{args.prompt}'",
+            f"total={timings['total_ms']:.0f}ms frames={len(frames)} bones={len(pick_bones)} "
+            f"root=({pick_root[0]:+.2f},{pick_root[2]:+.2f}) bytes={len(dgram)} prompt='{args.prompt}'",
             flush=True,
         )
         return 0
@@ -541,7 +562,7 @@ def main() -> int:
         flush=True,
     )
 
-    frame_queue: collections.deque[dict[str, tuple[np.ndarray, np.ndarray]]] = collections.deque()
+    frame_queue: collections.deque[tuple[dict[str, tuple[np.ndarray, np.ndarray]], np.ndarray]] = collections.deque()
     queue_lock = threading.Lock()
 
     def _generator_loop() -> None:
@@ -580,8 +601,8 @@ def main() -> int:
     send_fps = 60.0
     period = 1.0 / send_fps
     substeps = 3  # 20 FPS source -> 60 FPS SLERP playback
-    cur_frame: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
-    next_frame: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
+    cur_frame: tuple[dict[str, tuple[np.ndarray, np.ndarray]], np.ndarray] | None = None
+    next_frame: tuple[dict[str, tuple[np.ndarray, np.ndarray]], np.ndarray] | None = None
     sub_idx = 0
     packets_sent = 0
 
@@ -599,21 +620,24 @@ def main() -> int:
                         sub_idx = 0
 
             if cur_frame is not None:
+                cur_bones, cur_root = cur_frame
                 if next_frame is not None:
+                    next_bones, next_root = next_frame
                     alpha = min(1.0, sub_idx / float(substeps))
-                    blended = {
+                    blended_bones = {
                         k: (
-                            quat_slerp(cur_frame[k][0], next_frame[k][0], alpha),
-                            ((1.0 - alpha) * cur_frame[k][1] + alpha * next_frame[k][1]).astype(np.float32),
+                            quat_slerp(cur_bones[k][0], next_bones[k][0], alpha),
+                            ((1.0 - alpha) * cur_bones[k][1] + alpha * next_bones[k][1]).astype(np.float32),
                         )
-                        for k in cur_frame
-                        if k in next_frame
+                        for k in cur_bones
+                        if k in next_bones
                     }
+                    blended_root = ((1.0 - alpha) * cur_root + alpha * next_root).astype(np.float32)
                 else:
-                    blended = cur_frame
+                    blended_bones, blended_root = cur_bones, cur_root
 
                 elapsed = time.monotonic() - t_start
-                sock.sendto(build_vmc_pose_bundle(blended, elapsed), (args.host, args.port))
+                sock.sendto(build_vmc_pose_bundle(blended_bones, elapsed, root_world_vrm=blended_root), (args.host, args.port))
                 packets_sent += 1
                 sub_idx += 1
 

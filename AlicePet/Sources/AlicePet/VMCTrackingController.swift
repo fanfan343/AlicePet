@@ -64,8 +64,17 @@ final class VMCTrackingController {
 
     private var appliedVMCPresets: Set<VRMExpressionPreset> = []
     private var appliedVMCCustomKeys: Set<String> = []
+    private var appliedAnimeBridgeWeights: [String: Float] = [:]
     private var hasAppliedARKitShapes: Bool = false
     private var wasDrivingStream: Bool = false
+
+    /// Latest continuous world-space root XZ position (VRM meters) received via `/VMC/Ext/Root/Pos`,
+    /// used by Picture-World mode to walk Alice naturally across the 3D room floor.
+    var latestWorldRootXZ: SIMD2<Float>? {
+        guard isListening, hasFreshFrame, let root = driver.frame.root else { return nil }
+        let p = driver.convention.convert(position: root.position)
+        return SIMD2<Float>(p.x, p.z)
+    }
     private(set) var lastArmIKDiagnostics: [ArmIKRetargeter.ArmDiagnostics] = []
     private var restWorldCacheModelID: ObjectIdentifier?
     private var restWorldCache: [VRMHumanoidBone: simd_quatf] = [:]
@@ -387,6 +396,7 @@ final class VMCTrackingController {
             )
             expressionMixer.faceDriver.update(blendShapes: payload, controller: exprCtrl, maxAge: 1.0)
             hasAppliedARKitShapes = true
+            applyAnimeUpperFaceBridge(from: arkitShapes, on: exprCtrl, mask: mask)
         }
 
         let fullPerfectSyncActive = useARKitPerfectSync && arkitShapes.count >= 4
@@ -471,10 +481,76 @@ final class VMCTrackingController {
         resolveOpposition(ARKitFaceBlendShapes.browDownRight, ARKitFaceBlendShapes.browInnerUp)
     }
 
+    /// Bridges live ARKit upper-face & emotion signals onto high-visibility sculpted anime brow/eye
+    /// custom expressions (e.g. `eyebrow up` 15mm, `eyebrow angry` 13mm, `eyebrow perplex` 11mm)
+    /// when present on the VRM. On anime models converted by HANA_Tool, ARKit `brow*` morphs only move
+    /// ~1.4mm (invisible under bangs), whereas native anime brow/eye groups move 8–15mm cleanly.
+    /// Safely no-ops on generic VRMs without these custom expression names.
+    private func applyAnimeUpperFaceBridge(
+        from shapes: [String: Float],
+        on exprCtrl: VRMExpressionController,
+        mask: VMCFaceChannelMask
+    ) {
+        guard mask.contains(.upperFace) else { return }
+
+        let browOuter = 0.5 * ((shapes[ARKitFaceBlendShapes.browOuterUpLeft] ?? 0) + (shapes[ARKitFaceBlendShapes.browOuterUpRight] ?? 0))
+        let browInner = shapes[ARKitFaceBlendShapes.browInnerUp] ?? 0
+        let browDown = 0.5 * ((shapes[ARKitFaceBlendShapes.browDownLeft] ?? 0) + (shapes[ARKitFaceBlendShapes.browDownRight] ?? 0))
+        let smile = 0.5 * ((shapes[ARKitFaceBlendShapes.mouthSmileLeft] ?? 0) + (shapes[ARKitFaceBlendShapes.mouthSmileRight] ?? 0))
+        let frown = 0.5 * ((shapes[ARKitFaceBlendShapes.mouthFrownLeft] ?? 0) + (shapes[ARKitFaceBlendShapes.mouthFrownRight] ?? 0))
+        let jawOpen = shapes[ARKitFaceBlendShapes.jawOpen] ?? 0
+
+        let blinkMax = min(max(max(exprCtrl.weight(for: .blink), max(exprCtrl.weight(for: .blinkLeft), exprCtrl.weight(for: .blinkRight))), 0.0), 1.0)
+        let eyeYield = 1.0 - blinkMax
+
+        func clamp01(_ v: Float) -> Float { min(max(v, 0.0), 1.0) }
+
+        // Distinct, non-fighting anime eyebrow & eye targets driven purely from live ARKit weights:
+        // - Joy / Amazement -> lifted bright brows (`eyebrow up`) + warm mouth corner boost (`mouth smile2`)
+        // - Anger -> fierce lowered brows (`eyebrow angry`) + sharp eyes (`eyes angry`, yielded to blink)
+        // - Sadness -> troubled tilted brows (`eyebrow perplex`) + gentle down-cast eye mood (`eyes scornful`)
+        // - Cheekiness -> playful `eyebrow perplex2` (`八`) + subtle teasing `eyes sarcastic`
+        // - Speech prosody -> subtle eyebrow bounce tied to syllable jaw energy even in neutral!
+        let angerScore = clamp01((browDown - browInner * 0.55) * 1.45)
+        let sadScore = clamp01(browInner * 1.45 + frown * 0.70 - smile * 0.55 - angerScore * 0.4)
+        let cheekyScore = clamp01(browInner * 1.15 * clamp01(smile * 2.2 + 0.35) - frown * 0.9 - angerScore * 0.6)
+        let upScore = clamp01(browOuter * 1.10 + jawOpen * 0.22 - angerScore * 0.85 - sadScore * 0.45)
+
+        // Note: `eyes angry` already binds `怒り` (100), so split `怒り` cleanly without double-stacking!
+        let eyesAngryW = clamp01(angerScore * 0.72) * eyeYield
+        let browAngryW = clamp01(angerScore * 0.92 - eyesAngryW * 0.90)
+        let eyesSarcasticW = clamp01(cheekyScore * 0.62) * eyeYield
+        let browPerplexW = clamp01(sadScore * 0.95 - eyesSarcasticW * 0.45)
+        let browPerplex2W = clamp01(cheekyScore * 0.80)
+        let browUpW = clamp01(upScore * 0.92)
+        let smileBoostW = clamp01((smile - 0.28) * 0.55)
+
+        let targets: [String: Float] = [
+            "eyebrow up": browUpW,
+            "eyebrow angry": browAngryW,
+            "eyebrow perplex": browPerplexW,
+            "eyebrow perplex2": browPerplex2W,
+            "eyes angry": eyesAngryW,
+            "eyes sarcastic": eyesSarcasticW,
+            "mouth smile2": smileBoostW,
+        ]
+
+        // Smooth transitions cleanly so emotion switches & speech prosody feel organic at 60fps
+        let alpha: Float = appliedAnimeBridgeWeights.isEmpty ? 1.0 : 0.35
+        for (name, target) in targets {
+            let prev = appliedAnimeBridgeWeights[name] ?? 0.0
+            let next = prev + (target - prev) * alpha
+            let cleaned = next < 0.003 ? 0.0 : next
+            appliedAnimeBridgeWeights[name] = cleaned
+            exprCtrl.setCustomExpressionWeight(name, weight: cleaned)
+        }
+    }
+
     private func clearAppliedExpressions(on renderer: VRMRenderer, expressionMixer: ExpressionMixer) {
         guard let exprCtrl = renderer.expressionController else {
             appliedVMCPresets.removeAll()
             appliedVMCCustomKeys.removeAll()
+            appliedAnimeBridgeWeights.removeAll()
             hasAppliedARKitShapes = false
             return
         }
@@ -487,6 +563,10 @@ final class VMCTrackingController {
             )
             hasAppliedARKitShapes = false
         }
+        for (name, _) in appliedAnimeBridgeWeights {
+            exprCtrl.setCustomExpressionWeight(name, weight: 0.0)
+        }
+        appliedAnimeBridgeWeights.removeAll()
         for preset in appliedVMCPresets {
             exprCtrl.setExpressionWeight(preset, weight: 0.0)
         }

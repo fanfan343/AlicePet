@@ -257,15 +257,16 @@ final class PetController: NSObject, MTKViewDelegate {
 
     func movePictureWorldAvatar(deltaX: Float, deltaZ: Float) {
         guard pictureWorldRenderer.isActive else { return }
-        var p = pictureWorldRenderer.avatarWorldPosition
-        p.x += deltaX
-        p.z += deltaZ
-        if let minB = pictureWorldRenderer.config?.walkBoundsMin, minB.count == 2,
-           let maxB = pictureWorldRenderer.config?.walkBoundsMax, maxB.count == 2 {
-            p.x = min(max(p.x, minB[0]), maxB[0])
-            p.z = min(max(p.z, minB[1]), maxB[1])
-        }
-        pictureWorldRenderer.avatarWorldPosition = p
+        let candidate = SIMD3<Float>(
+            pictureWorldRenderer.avatarWorldPosition.x + deltaX,
+            0.0,
+            pictureWorldRenderer.avatarWorldPosition.z + deltaZ
+        )
+        let aspect: Float = {
+            guard let view = hostView, view.bounds.height > 0 else { return 16.0 / 9.0 }
+            return Float(view.bounds.width / view.bounds.height)
+        }()
+        pictureWorldRenderer.avatarWorldPosition = pictureWorldRenderer.clampAvatarPositionToSafeRoom(candidate, viewportAspect: aspect)
         applyPictureWorldRootTransform()
     }
 
@@ -558,6 +559,12 @@ final class PetController: NSObject, MTKViewDelegate {
                 window: view.window
             )
             if pictureWorldRenderer.isActive {
+                if animationMixer.activeBodySource == .ardy,
+                   let rootXZ = animationMixer.ardyChannel.latestWorldRootXZ {
+                    pictureWorldRenderer.applyARDYRootMotion(worldRootXZ: rootXZ, viewportAspect: aspect)
+                } else {
+                    pictureWorldRenderer.resetARDYRootTracking()
+                }
                 applyPictureWorldRootTransform()
             }
         }

@@ -239,6 +239,47 @@ class Audio2Face3DEngine:
 
         return w[:, self.arkit_perm].astype(np.float32)
 
+    def _prepare_audio_windows(self, waveform_16k: np.ndarray, infer_fps: float = 20.0) -> tuple[np.ndarray, int, int, int]:
+        """Pads 16kHz audio once for O(1) slice windowing during real-time chunked inference."""
+        duration_s = len(waveform_16k) / 16000.0
+        n_frames = max(1, int(math.ceil(duration_s * infer_fps)))
+        buf_len = int(self.net_info["audio_params"]["buffer_len"])
+        buf_ofs = int(self.net_info["audio_params"]["buffer_ofs"])
+        inp_scale = float(self.model_cfg.get("input_strength", 1.0))
+        wav_scaled = (waveform_16k * inp_scale).astype(np.float32)
+        wav_pad = np.pad(wav_scaled, (buf_ofs, buf_len), mode="constant")
+        return wav_pad, n_frames, buf_len, buf_ofs
+
+    def infer_frame_slice(
+        self,
+        wav_pad: np.ndarray,
+        start_frame: int,
+        count: int,
+        buf_len: int,
+        emotion_name: str = "neutral",
+        emotion_strength: float = 0.7,
+        infer_fps: float = 20.0,
+        batch_size: int = 16,
+    ) -> tuple[np.ndarray, float]:
+        """Infers only `[start_frame, start_frame + count)` (~190ms for 8 frames / 0.4s on M1)."""
+        windows = np.empty((count, 1, buf_len), dtype=np.float32)
+        for j in range(count):
+            c = int(round((start_frame + j) * 16000.0 / infer_fps))
+            windows[j, 0, :] = wav_pad[c : c + buf_len]
+
+        emo_vec = self.build_emotion_vector(emotion_name, emotion_strength)
+        t0 = time.monotonic()
+        outs = []
+        for s in range(0, count, batch_size):
+            e = min(count, s + batch_size)
+            emo_b = np.broadcast_to(emo_vec[None, None, :], (e - s, 1, 26)).copy()
+            r = self.sess.run(["result"], {"input": windows[s:e], "emotion": emo_b})[0]
+            outs.append(r[:, 0, :140])
+        skin_coeffs = np.concatenate(outs, axis=0).astype(np.float32)
+        bs_52 = self.solve_blendshapes_from_coeffs(skin_coeffs)
+        infer_ms = (time.monotonic() - t0) * 1000.0
+        return bs_52, infer_ms
+
     def infer_audio(
         self,
         waveform_16k: np.ndarray,
@@ -248,33 +289,17 @@ class Audio2Face3DEngine:
         batch_size: int = 32,
     ) -> tuple[np.ndarray, float]:
         """Runs Audio2Face-3D ONNX + 52-D solver, returning `(weights_52[N, 52], infer_ms)` at `infer_fps`."""
-        duration_s = len(waveform_16k) / 16000.0
-        n_frames = max(1, int(math.ceil(duration_s * infer_fps)))
-        buf_len = int(self.net_info["audio_params"]["buffer_len"])
-        buf_ofs = int(self.net_info["audio_params"]["buffer_ofs"])
-
-        # Apply input_strength from model_config
-        inp_scale = float(self.model_cfg.get("input_strength", 1.0))
-        wav_scaled = (waveform_16k * inp_scale).astype(np.float32)
-        wav_pad = np.pad(wav_scaled, (buf_ofs, buf_len), mode="constant")
-
-        windows = np.empty((n_frames, 1, buf_len), dtype=np.float32)
-        for i in range(n_frames):
-            c = int(round(i * 16000.0 / infer_fps))
-            windows[i, 0, :] = wav_pad[c : c + buf_len]
-
-        emo_vec = self.build_emotion_vector(emotion_name, emotion_strength)
-        t0 = time.monotonic()
-        outs = []
-        for s in range(0, n_frames, batch_size):
-            e = min(n_frames, s + batch_size)
-            emo_b = np.broadcast_to(emo_vec[None, None, :], (e - s, 1, 26)).copy()
-            r = self.sess.run(["result"], {"input": windows[s:e], "emotion": emo_b})[0]
-            outs.append(r[:, 0, :140])
-        skin_coeffs = np.concatenate(outs, axis=0).astype(np.float32)
-        bs_52 = self.solve_blendshapes_from_coeffs(skin_coeffs)
-        infer_ms = (time.monotonic() - t0) * 1000.0
-        return bs_52, infer_ms
+        wav_pad, n_frames, buf_len, _ = self._prepare_audio_windows(waveform_16k, infer_fps=infer_fps)
+        return self.infer_frame_slice(
+            wav_pad,
+            start_frame=0,
+            count=n_frames,
+            buf_len=buf_len,
+            emotion_name=emotion_name,
+            emotion_strength=emotion_strength,
+            infer_fps=infer_fps,
+            batch_size=batch_size,
+        )
 
 
 def postprocess_a2f_for_anime(raw: np.ndarray, params: TuningParams) -> np.ndarray:
@@ -392,19 +417,23 @@ def main() -> int:
 
     cur_emotion = args.emotion
     cur_emo_strength = args.emotion_strength
-    raw_bs, inf_ms = engine.infer_audio(
-        waveform,
-        emotion_name=cur_emotion,
-        emotion_strength=cur_emo_strength,
-        infer_fps=args.infer_fps,
-    )
-    rtf = (inf_ms / 1000.0) / max(duration_s, 1e-3)
-    processed_bs = postprocess_a2f_for_anime(raw_bs, params)
-    n_frames = len(processed_bs)
+    wav_pad, n_frames, buf_len, _ = engine._prepare_audio_windows(waveform, infer_fps=args.infer_fps)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     if args.self_test:
+        raw_bs, inf_ms = engine.infer_frame_slice(
+            wav_pad,
+            start_frame=0,
+            count=n_frames,
+            buf_len=buf_len,
+            emotion_name=cur_emotion,
+            emotion_strength=cur_emo_strength,
+            infer_fps=args.infer_fps,
+            batch_size=32,
+        )
+        rtf = (inf_ms / 1000.0) / max(duration_s, 1e-3)
+        processed_bs = postprocess_a2f_for_anime(raw_bs, params)
         scores = (
             processed_bs[:, IDX_JAW_OPEN] * 1.4
             + processed_bs[:, IDX_MOUTH_SMILE_L] * 0.7
@@ -441,12 +470,99 @@ def main() -> int:
         )
         return 0
 
+    # Real-time streaming chunked inference:
+    # Only infer the first 0.4s (8 frames, ~190ms) before starting playback, then stay ahead
+    # in a background thread at ~2x realtime. Live emotion switches re-infer from playhead in ~200ms!
     state_lock = threading.Lock()
+    wake_event = threading.Event()
     loop_enabled = bool(args.loop)
+    raw_bs = np.zeros((n_frames, 52), dtype=np.float32)
+    processed_bs = np.zeros((n_frames, 52), dtype=np.float32)
+    frame_gen = np.full(n_frames, -1, dtype=np.int32)
+    current_gen = 1
+    playhead_frame = 0
+    emo_switch_started_at: float | None = None
+
+    first_n = min(n_frames, 8)
+    first_raw, first_ms = engine.infer_frame_slice(
+        wav_pad,
+        start_frame=0,
+        count=first_n,
+        buf_len=buf_len,
+        emotion_name=cur_emotion,
+        emotion_strength=cur_emo_strength,
+        infer_fps=args.infer_fps,
+        batch_size=16,
+    )
+    raw_bs[:first_n] = first_raw
+    frame_gen[:first_n] = current_gen
+    processed_bs[:first_n] = postprocess_a2f_for_anime(first_raw, params)
+
+    def _producer_loop() -> None:
+        nonlocal processed_bs, emo_switch_started_at
+        chunk_size = 10  # 0.5s @ 20fps (~235ms CPU inference -> ~2.1x realtime)
+        while RUNNING:
+            with state_lock:
+                gen = current_gen
+                emo = cur_emotion
+                strength = cur_emo_strength
+                ph = playhead_frame
+                is_loop = loop_enabled
+
+                # Pick earliest uncomputed frame ahead of playhead (wrapping if looping)
+                start_f: int | None = None
+                for off in range(n_frames):
+                    idx = ph + off
+                    if idx >= n_frames:
+                        if not is_loop:
+                            break
+                        idx -= n_frames
+                    if frame_gen[idx] != gen:
+                        start_f = idx
+                        break
+
+            if start_f is None:
+                wake_event.wait(timeout=0.1)
+                wake_event.clear()
+                continue
+
+            # Collect contiguous stale frames up to chunk_size
+            end_f = min(n_frames, start_f + chunk_size)
+            with state_lock:
+                while end_f > start_f + 1 and frame_gen[end_f - 1] == gen:
+                    end_f -= 1
+            count = end_f - start_f
+
+            chunk_raw, chunk_ms = engine.infer_frame_slice(
+                wav_pad,
+                start_frame=start_f,
+                count=count,
+                buf_len=buf_len,
+                emotion_name=emo,
+                emotion_strength=strength,
+                infer_fps=args.infer_fps,
+                batch_size=16,
+            )
+
+            with state_lock:
+                if gen != current_gen:
+                    # Emotion changed while inferring this chunk; immediately prioritize new emotion
+                    continue
+                raw_bs[start_f:end_f] = chunk_raw
+                frame_gen[start_f:end_f] = gen
+                # Re-postprocess ready span quickly (<0.2ms) for smooth temporal continuity
+                processed_bs = postprocess_a2f_for_anime(raw_bs, params)
+                if emo_switch_started_at is not None:
+                    sw_ms = (time.monotonic() - emo_switch_started_at) * 1000.0
+                    emo_switch_started_at = None
+                    print(f"[A2F-3D] Switched live emotion -> {emo} ({strength:.2f}) in {sw_ms:.0f}ms (chunk={chunk_ms:.0f}ms)", flush=True)
+
+    producer_thread = threading.Thread(target=_producer_loop, daemon=True)
+    producer_thread.start()
 
     if args.live_params:
         def _stdin_watcher() -> None:
-            nonlocal raw_bs, processed_bs, loop_enabled, cur_emotion, cur_emo_strength
+            nonlocal processed_bs, loop_enabled, cur_emotion, cur_emo_strength, current_gen, emo_switch_started_at
             for line in sys.stdin:
                 line = line.strip()
                 if not line:
@@ -454,44 +570,35 @@ def main() -> int:
                 try:
                     payload = json.loads(line)
                     if isinstance(payload, dict):
-                        re_infer = False
-                        new_emo = cur_emotion
-                        new_str = cur_emo_strength
                         with state_lock:
+                            emo_changed = False
                             if "loop" in payload:
                                 loop_enabled = bool(payload["loop"])
-                            if "emotion" in payload and str(payload["emotion"]).strip().lower() != cur_emotion:
-                                new_emo = str(payload["emotion"]).strip().lower()
-                                re_infer = True
+                            if "emotion" in payload:
+                                cand_emo = str(payload["emotion"]).strip().lower()
+                                if cand_emo and cand_emo != cur_emotion:
+                                    cur_emotion = cand_emo
+                                    emo_changed = True
                             if "emotion_strength" in payload:
                                 cand_s = max(0.0, min(1.0, float(payload["emotion_strength"])))
                                 if abs(cand_s - cur_emo_strength) > 0.02:
-                                    new_str = cand_s
-                                    re_infer = True
+                                    cur_emo_strength = cand_s
+                                    emo_changed = True
                             params.update_from_dict(payload)
-                            if not re_infer:
+                            if emo_changed:
+                                current_gen += 1
+                                emo_switch_started_at = time.monotonic()
+                                wake_event.set()
+                            else:
                                 processed_bs = postprocess_a2f_for_anime(raw_bs, params)
-                        if re_infer:
-                            new_raw, re_ms = engine.infer_audio(
-                                waveform,
-                                emotion_name=new_emo,
-                                emotion_strength=new_str,
-                                infer_fps=args.infer_fps,
-                            )
-                            with state_lock:
-                                cur_emotion = new_emo
-                                cur_emo_strength = new_str
-                                raw_bs = new_raw
-                                processed_bs = postprocess_a2f_for_anime(raw_bs, params)
-                            print(f"[A2F-3D] Switched live emotion -> {new_emo} ({new_str:.2f}) in {re_ms:.0f}ms", flush=True)
                 except Exception:
                     pass
 
         threading.Thread(target=_stdin_watcher, daemon=True).start()
 
     print(
-        f"[A2F-3D] Ready: audio={audio_path.name} ({duration_s:.1f}s) emo={cur_emotion}({cur_emo_strength:.2f}) "
-        f"infer={inf_ms:.0f}ms ({1.0/max(rtf,1e-4):.1f}x realtime) -> {args.host}:{args.port}",
+        f"[A2F-3D] Streaming ready in {engine.load_ms + first_ms:.0f}ms (load={engine.load_ms:.0f}ms, first {first_n}f={first_ms:.0f}ms): "
+        f"audio={audio_path.name} ({duration_s:.1f}s) emo={cur_emotion}({cur_emo_strength:.2f}) -> {args.host}:{args.port}",
         flush=True,
     )
 
@@ -504,6 +611,7 @@ def main() -> int:
     period = 1.0 / send_fps
     total_packets = 0
     audio_proc: subprocess.Popen | None = None
+    last_sent_vec: np.ndarray | None = None
 
     try:
         while RUNNING:
@@ -521,17 +629,30 @@ def main() -> int:
                 if elapsed >= duration_s or (audio_proc.poll() is not None and elapsed > 0.2):
                     break
 
-                with state_lock:
-                    cur_bs = processed_bs
-                    offset_s = params.sync_offset_ms / 1000.0
-                    head_gain = params.head_motion_gain
-
-                t_sample = max(0.0, min(duration_s, elapsed + offset_s))
+                t_sample = max(0.0, min(duration_s, elapsed + params.sync_offset_ms / 1000.0))
                 pos = t_sample * args.infer_fps
-                i0 = min(len(cur_bs) - 1, max(0, int(pos)))
-                i1 = min(len(cur_bs) - 1, i0 + 1)
+                i0 = min(n_frames - 1, max(0, int(pos)))
+                i1 = min(n_frames - 1, i0 + 1)
                 frac = pos - i0
-                vec = (1.0 - frac) * cur_bs[i0] + frac * cur_bs[i1]
+
+                with state_lock:
+                    playhead_frame = i0
+                    head_gain = params.head_motion_gain
+                    r0 = frame_gen[i0] >= 0
+                    r1 = frame_gen[i1] >= 0
+                    if r0 and r1:
+                        vec = (1.0 - frac) * processed_bs[i0] + frac * processed_bs[i1]
+                    elif r0:
+                        vec = processed_bs[i0].copy()
+                    elif last_sent_vec is not None:
+                        vec = last_sent_vec.copy()
+                    else:
+                        vec = np.zeros(52, dtype=np.float32)
+
+                # Smooth emotion-boundary transitions at 60fps so live emotion switches glide cleanly
+                if last_sent_vec is not None:
+                    vec = 0.55 * vec + 0.45 * last_sent_vec
+                last_sent_vec = vec
 
                 energy = float(vec[IDX_JAW_OPEN] + 0.4 * vec[IDX_MOUTH_FUNNEL])
                 dgram = build_vmc_frame(vec, elapsed, head_motion_gain=head_gain, speech_energy=energy)

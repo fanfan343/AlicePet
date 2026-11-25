@@ -230,7 +230,7 @@ final class AudioLipSyncTuningPanel: NSObject {
         root.addArrangedSubview(enginePopup)
         enginePopup.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
 
-        let emoLabel = NSTextField(labelWithString: "原生情绪控制（Audio2Face-3D 实时生效）")
+        let emoLabel = NSTextField(labelWithString: "原生情绪控制（Audio2Face-3D 流式切换 ~0.25s）")
         emoLabel.font = .systemFont(ofSize: 12, weight: .semibold)
         emoLabel.textColor = .secondaryLabelColor
         root.addArrangedSubview(emoLabel)
