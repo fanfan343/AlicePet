@@ -38,6 +38,8 @@ final class VMCTrackingController {
     private var appliedVMCCustomKeys: Set<String> = []
     private var hasAppliedARKitShapes: Bool = false
     private var wasDrivingStream: Bool = false
+    private var restWorldCacheModelID: ObjectIdentifier?
+    private var restWorldCache: [VRMHumanoidBone: simd_quatf] = [:]
 
     /// Case-insensitive + `_L`/`_R` suffix lookup table mapping sender blendshape names
     /// (e.g. `EyeBlinkLeft`, `eyeBlinkLeft`, `eyeBlink_L`) to canonical `ARKitFaceBlendShapes` keys.
@@ -199,6 +201,110 @@ final class VMCTrackingController {
             onStatusChanged?()
         }
         return true
+    }
+
+    /// Applies ONLY humanoid bones from this VMC channel (used by AnimationMixer Layer 0).
+    @discardableResult
+    func applyBonesOnly(to model: VRMModel) -> Bool {
+        guard isListening else { return false }
+        let applied = driver.apply(to: model, controller: nil)
+        if applied && !isReceivingFrames {
+            isReceivingFrames = true
+            onStatusChanged?()
+        }
+        return applied
+    }
+
+    /// Applies selected humanoid bones ADDITIVELY on top of the model's current pose
+    /// (used by AnimationMixer Layer 1 so speech head nods compose cleanly over full-body AI motion).
+    @discardableResult
+    func applyBonesAdditive(
+        to model: VRMModel,
+        bones: Set<VRMHumanoidBone>,
+        weight: Float
+    ) -> Bool {
+        guard isListening, hasFreshFrame, weight > 0.0001, let humanoid = model.humanoid else {
+            return false
+        }
+        ensureRestWorldCache(for: model, humanoid: humanoid)
+
+        let snapshot = driver.frame
+        let clampedWeight = min(max(weight, 0.0), 1.5)
+        let identity = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+        var touched = false
+
+        for bone in bones {
+            guard let transform = snapshot.bones[bone],
+                  let index = humanoid.getBoneNode(bone), index < model.nodes.count,
+                  let restWorld = restWorldCache[bone] else {
+                continue
+            }
+            let node = model.nodes[index]
+            let delta = driver.convention.convert(rotation: transform.rotation)
+            let deltaLocal = simd_normalize(restWorld.inverse * delta * restWorld)
+            let scaledDelta = simd_slerp(identity, deltaLocal, min(clampedWeight, 1.0))
+            node.rotation = simd_normalize(node.rotation * scaledDelta)
+            node.updateLocalMatrix()
+            touched = true
+        }
+
+        if touched {
+            for node in model.nodes where node.parent == nil {
+                node.updateWorldTransform()
+            }
+            if !isReceivingFrames {
+                isReceivingFrames = true
+                onStatusChanged?()
+            }
+        }
+        return touched
+    }
+
+    /// Applies ONLY blendshapes (52 ARKit PerfectSync / VRM presets) from this VMC channel
+    /// (used by AnimationMixer Layer 2).
+    @discardableResult
+    func applyBlendShapesOnly(on renderer: VRMRenderer, expressionMixer: ExpressionMixer) -> Bool {
+        guard isListening, hasFreshFrame else {
+            clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
+            return false
+        }
+        let snapshot = driver.frame
+        guard !snapshot.blendShapes.isEmpty, let exprCtrl = renderer.expressionController else {
+            clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
+            return false
+        }
+        wasDrivingStream = true
+        applyBlendShapes(snapshot.blendShapes, on: exprCtrl, expressionMixer: expressionMixer)
+        if !isReceivingFrames {
+            isReceivingFrames = true
+            onStatusChanged?()
+        }
+        return true
+    }
+
+    /// Zeroes out any blendshapes previously written by this channel when another face layer takes over or stream stops.
+    func clearBlendShapesIfNeeded(on renderer: VRMRenderer, expressionMixer: ExpressionMixer) {
+        guard hasAppliedARKitShapes || !appliedVMCPresets.isEmpty || !appliedVMCCustomKeys.isEmpty || wasDrivingStream else {
+            return
+        }
+        wasDrivingStream = false
+        clearAppliedExpressions(on: renderer, expressionMixer: expressionMixer)
+    }
+
+    private func ensureRestWorldCache(for model: VRMModel, humanoid: VRMHumanoid) {
+        let modelID = ObjectIdentifier(model)
+        if restWorldCacheModelID == modelID { return }
+        restWorldCacheModelID = modelID
+        restWorldCache.removeAll()
+        for (bone, ref) in humanoid.humanBones where ref.node < model.nodes.count {
+            var rot = model.nodes[ref.node].initialRotation
+            var cursor = model.nodes[ref.node].parent
+            while let parent = cursor {
+                rot = parent.initialRotation * rot
+                cursor = parent.parent
+            }
+            restWorldCache[bone] = simd_normalize(rot)
+        }
     }
 
     private func applyBlendShapes(

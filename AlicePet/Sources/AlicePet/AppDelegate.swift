@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var lipSyncTuningPanel: AudioLipSyncTuningPanel?
     private var ardyLabPanel: ArdyLabPanel?
+    private var motionBricksLabPanel: MotionBricksLabPanel?
 
     private var isClickThrough: Bool = false
     private var isAlwaysOnTop: Bool = true
@@ -145,11 +146,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.controller.localArdyActive,
                 status: self.controller.localArdyService.lastStatusLine
             )
+            self.motionBricksLabPanel?.setRunningState(
+                self.controller.localMotionBricksActive,
+                preset: self.controller.localMotionBricksService.currentPreset,
+                status: self.controller.localMotionBricksService.lastStatusLine
+            )
             self.refreshMenus()
         }
         controller.localArdyService.onStatusLine = { [weak self] line in
             guard let self else { return }
             self.ardyLabPanel?.setRunningState(self.controller.localArdyActive, status: line)
+        }
+        controller.localMotionBricksService.onStatusLine = { [weak self] line in
+            guard let self else { return }
+            self.motionBricksLabPanel?.setRunningState(
+                self.controller.localMotionBricksActive,
+                preset: self.controller.localMotionBricksService.currentPreset,
+                status: line
+            )
         }
         controller.onVMCError = { [weak self] message in
             self?.updateStatusBarTitle()
@@ -187,19 +201,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusBarTitle() {
-        if controller.localArdyActive && controller.localAudioFaceActive {
-            statusItem.button?.title = "AlicePet · 💃🗣️"
+        var badges: [String] = []
+        if controller.localMotionBricksActive {
+            badges.append(controller.animationMixer.motionBricksChannel.hasFreshFrame ? "🏃" : "🏃(加载中)")
         } else if controller.localArdyActive {
-            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 💃" : "AlicePet · 💃(生成中)"
-        } else if controller.localAudioFaceActive {
-            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 🗣️" : "AlicePet · 🗣️(推理中)"
+            badges.append(controller.animationMixer.ardyChannel.hasFreshFrame ? "💃" : "💃(生成中)")
         } else if controller.localMotionActive {
-            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 🎭" : "AlicePet · 🎭(启动中)"
+            badges.append(controller.vmcReceiving ? "🎭" : "🎭(启动中)")
         } else if controller.vmcActive {
-            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 📡" : "AlicePet · 📡(等待)"
-        } else {
-            statusItem.button?.title = "AlicePet"
+            badges.append(controller.vmcReceiving ? "📡" : "📡(等待)")
         }
+        if controller.localAudioFaceActive {
+            badges.append(controller.animationMixer.audioFaceChannel.hasFreshFrame ? "🗣️" : "🗣️(推理中)")
+        }
+        statusItem.button?.title = badges.isEmpty ? "AlicePet" : "AlicePet · " + badges.joined(separator: "")
     }
 
     private func refreshMenus() {
@@ -552,6 +567,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Experimental / Lab Features Submenu (tests live here until promoted to main menu)
         let labMenu = NSMenu()
+        let openMBItem = NSMenuItem(
+            title: controller.localMotionBricksActive
+                ? "打开 MotionBricks 实时动作面板… (运行中 · \(controller.localMotionBricksService.currentPreset.displayTitle))"
+                : "打开 MotionBricks 实时动作与风格面板… (NVIDIA SOMA)",
+            action: #selector(openLabMotionBricksPanel),
+            keyEquivalent: ""
+        )
+        openMBItem.target = self
+        openMBItem.state = controller.localMotionBricksActive ? .on : .off
+        labMenu.addItem(openMBItem)
+
         let openArdyItem = NSMenuItem(
             title: controller.localArdyActive ? "打开 ARDY 文本动作面板… (运行中)" : "打开 ARDY 文本生成动作面板… (20fps)",
             action: #selector(openLabArdyPanel),
@@ -579,11 +605,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         labMenu.addItem(customAudioItem)
 
         labMenu.addItem(.separator())
-        let labInfoItem = NSMenuItem(title: "提示：ARDY 全身动作与 LAM 语音对口型可同时开启", action: nil, keyEquivalent: "")
+        let mixerStatus = "混合器：Body=\(controller.animationMixer.activeBodySource.displayLabel) · Face=\(controller.animationMixer.activeFaceSource.rawValue) · Head叠加"
+        let labInfoItem = NSMenuItem(title: mixerStatus, action: nil, keyEquivalent: "")
         labInfoItem.isEnabled = false
         labMenu.addItem(labInfoItem)
 
-        let anyLabRunning = controller.localAudioFaceActive || controller.localArdyActive
+        let anyLabRunning = controller.localAudioFaceActive || controller.localArdyActive || controller.localMotionBricksActive
         let labRootTitle = anyLabRunning ? "测试功能 (Lab · 运行中)" : "测试功能 (Lab)"
         let labRoot = NSMenuItem(title: labRootTitle, action: nil, keyEquivalent: "")
         labRoot.submenu = labMenu
@@ -703,6 +730,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([AppLogger.shared.logFileURL])
     }
 
+    @objc private func openLabMotionBricksPanel() {
+        if motionBricksLabPanel == nil {
+            let panel = MotionBricksLabPanel(
+                initialPreset: controller.localMotionBricksService.currentPreset,
+                faceCamera: controller.localMotionBricksService.faceCamera
+            )
+            panel.onToggleStartStop = { [weak self] in
+                guard let self else { return }
+                if self.controller.localMotionBricksActive {
+                    self.controller.stopMotionBricksTest()
+                } else {
+                    _ = self.controller.startMotionBricksTest()
+                }
+                self.updateStatusBarTitle()
+                self.motionBricksLabPanel?.setRunningState(
+                    self.controller.localMotionBricksActive,
+                    preset: self.controller.localMotionBricksService.currentPreset,
+                    status: self.controller.localMotionBricksService.lastStatusLine
+                )
+                self.refreshMenus()
+            }
+            panel.onSelectPreset = { [weak self] preset in
+                guard let self else { return }
+                self.controller.localMotionBricksService.sendPreset(preset)
+                if !self.controller.localMotionBricksActive {
+                    _ = self.controller.startMotionBricksTest()
+                    self.updateStatusBarTitle()
+                    self.refreshMenus()
+                }
+                self.motionBricksLabPanel?.setRunningState(
+                    self.controller.localMotionBricksActive,
+                    preset: preset,
+                    status: "正在生成平滑过渡 -> \(preset.displayTitle)"
+                )
+            }
+            panel.onToggleFaceCamera = { [weak self] enabled in
+                self?.controller.localMotionBricksService.setFaceCamera(enabled)
+            }
+            motionBricksLabPanel = panel
+        }
+        motionBricksLabPanel?.setRunningState(
+            controller.localMotionBricksActive,
+            preset: controller.localMotionBricksService.currentPreset,
+            status: controller.localMotionBricksService.lastStatusLine
+        )
+        motionBricksLabPanel?.show()
+    }
+
     @objc private func openLabArdyPanel() {
         if ardyLabPanel == nil {
             let panel = ArdyLabPanel(
@@ -714,7 +789,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.controller.localArdyActive {
                     self.controller.stopArdyMotionTest()
                 } else {
-                    _ = self.controller.startArdyMotionTest(port: self.preferredVMCPort)
+                    _ = self.controller.startArdyMotionTest()
                 }
                 self.updateStatusBarTitle()
                 self.ardyLabPanel?.setRunningState(
@@ -727,7 +802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.controller.localArdyService.sendLivePrompt(prompt, cfg: cfg)
                 if !self.controller.localArdyActive {
-                    _ = self.controller.startArdyMotionTest(port: self.preferredVMCPort)
+                    _ = self.controller.startArdyMotionTest()
                     self.updateStatusBarTitle()
                     self.refreshMenus()
                 }
@@ -770,7 +845,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if controller.localAudioFaceActive {
             controller.stopAudioFaceTest()
         } else {
-            _ = controller.startAudioFaceTest(audioURL: nil, port: preferredVMCPort)
+            _ = controller.startAudioFaceTest(audioURL: nil)
         }
         updateStatusBarTitle()
         lipSyncTuningPanel?.setPlayingState(
@@ -789,7 +864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel.directoryURL = dir.appendingPathComponent("samples")
         }
         if panel.runModal() == .OK, let url = panel.url {
-            _ = controller.startAudioFaceTest(audioURL: url, port: preferredVMCPort, maxSeconds: 30.0)
+            _ = controller.startAudioFaceTest(audioURL: url, maxSeconds: 30.0)
             updateStatusBarTitle()
             lipSyncTuningPanel?.setPlayingState(
                 controller.localAudioFaceActive,

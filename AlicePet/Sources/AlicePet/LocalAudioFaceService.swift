@@ -6,8 +6,6 @@ import Foundation
 @MainActor
 final class LocalAudioFaceService {
     var params: AudioLipSyncParams = AudioLipSyncParams.loadFromDefaults()
-    /// Suppresses procedural Neck/Head bones whenever an external full-body driver (e.g. ARDY) owns the skeleton.
-    var suppressHeadMotion: Bool = false
     private(set) var isRunning: Bool = false
     private(set) var activeAudioName: String?
 
@@ -91,7 +89,7 @@ final class LocalAudioFaceService {
             "--lip-reveal", String(format: "%.3f", params.lipRevealGain),
             "--smoothing", String(format: "%.3f", params.smoothing),
             "--upper-face", String(format: "%.3f", params.upperFaceGain),
-            "--head-motion", String(format: "%.3f", suppressHeadMotion ? 0.0 : params.headMotionGain),
+            "--head-motion", String(format: "%.3f", params.headMotionGain),
             "--sync-offset-ms", String(format: "%.1f", params.syncOffsetMs),
             "--natural-blinks", params.naturalBlinks ? "1" : "0",
             "--loop", params.loopPlayback ? "1" : "0",
@@ -179,22 +177,8 @@ final class LocalAudioFaceService {
 
     func pushLiveParams(_ newParams: AudioLipSyncParams) {
         self.params = newParams
-        sendEffectiveParamsToProcess()
-    }
-
-    func setHeadMotionSuppressed(_ suppressed: Bool) {
-        guard suppressHeadMotion != suppressed else { return }
-        suppressHeadMotion = suppressed
-        sendEffectiveParamsToProcess()
-    }
-
-    private func sendEffectiveParamsToProcess() {
-        guard isRunning, let handle = stdinPipe?.fileHandleForWriting else { return }
-        var effective = params
-        if suppressHeadMotion {
-            effective.headMotionGain = 0.0
-        }
-        guard let line = effective.toLiveJSONLine() else { return }
+        guard isRunning, let handle = stdinPipe?.fileHandleForWriting,
+              let line = newParams.toLiveJSONLine() else { return }
         try? handle.write(contentsOf: line)
     }
 

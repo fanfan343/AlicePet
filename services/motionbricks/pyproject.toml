@@ -1,0 +1,13 @@
+[project]
+name = "alicepet-motionbricks"
+version = "0.1.0"
+description = "NVIDIA MotionBricks SOMA (ONNX Runtime CPU) -> 60 FPS VMC/OSC motion service for AlicePet"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26,<3",
+    "scipy>=1.13",
+    "warp-lang>=1.7",
+    "usd-core>=24.11",
+    "onnxruntime>=1.20",
+    "python-osc>=1.9.0",
+]

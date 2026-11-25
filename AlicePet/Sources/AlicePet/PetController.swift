@@ -26,10 +26,12 @@ final class PetController: NSObject, MTKViewDelegate {
     let recipeStore = AssetRecipeStore()
     let poseController = PoseController()
     let expressionMixer = ExpressionMixer()
-    let vmcController = VMCTrackingController()
+    let animationMixer = AnimationMixer()
+    var vmcController: VMCTrackingController { animationMixer.externalChannel }
     let localMotionService = LocalMotionService()
     let localAudioFaceService = LocalAudioFaceService()
     let localArdyService = LocalArdyService()
+    let localMotionBricksService = LocalMotionBricksService()
 
     private(set) var model: VRMModel?
     private(set) var loadedModelURL: URL?
@@ -71,15 +73,17 @@ final class PetController: NSObject, MTKViewDelegate {
     private(set) var lightingPreset: LightingPreset = .animeSoftDay
     private(set) var outlineStyle: OutlineStyle = .off
 
-    var vmcActive: Bool { vmcController.isListening }
-    var vmcReceiving: Bool { vmcController.isReceivingFrames }
+    var vmcActive: Bool { animationMixer.externalChannel.isListening }
+    var vmcReceiving: Bool { animationMixer.externalChannel.isReceivingFrames }
     var localMotionActive: Bool { localMotionService.isRunning }
     var localAudioFaceActive: Bool { localAudioFaceService.isRunning }
     var localArdyActive: Bool { localArdyService.isRunning }
+    var localMotionBricksActive: Bool { localMotionBricksService.isRunning }
     var onVMCStatusChanged: (() -> Void)?
     var onVMCError: ((String) -> Void)?
 
     private var startTime: TimeInterval = CACurrentMediaTime()
+    private var lastFrameTime: TimeInterval = CACurrentMediaTime()
     private var outfitNodeMeshes: [String: (nodeIndex: Int, meshIndex: Int)] = [:]
 
     // Lightweight periodic performance baseline sampler
@@ -107,12 +111,24 @@ final class PetController: NSObject, MTKViewDelegate {
         applyLightingAndOutline()
         renderer.enableSpringBone = springBoneEnabled
 
-        vmcController.onStatusChanged = { [weak self] in
+        animationMixer.onMixerStateChanged = { [weak self] in
             self?.onVMCStatusChanged?()
         }
-        vmcController.onError = { [weak self] msg in
+        animationMixer.externalChannel.onStatusChanged = { [weak self] in
+            self?.onVMCStatusChanged?()
+        }
+        animationMixer.externalChannel.onError = { [weak self] msg in
             self?.localMotionService.stop()
             self?.onVMCError?(msg)
+        }
+        animationMixer.ardyChannel.onStatusChanged = { [weak self] in
+            self?.onVMCStatusChanged?()
+        }
+        animationMixer.motionBricksChannel.onStatusChanged = { [weak self] in
+            self?.onVMCStatusChanged?()
+        }
+        animationMixer.audioFaceChannel.onStatusChanged = { [weak self] in
+            self?.onVMCStatusChanged?()
         }
         localMotionService.onStateChanged = { [weak self] in
             self?.onVMCStatusChanged?()
@@ -125,9 +141,7 @@ final class PetController: NSObject, MTKViewDelegate {
         }
         localAudioFaceService.onFinishedNaturally = { [weak self] in
             guard let self else { return }
-            if !self.localMotionActive {
-                self.stopVMC()
-            }
+            self.stopAudioFaceTest()
             self.onVMCStatusChanged?()
         }
         localAudioFaceService.onError = { [weak self] msg in
@@ -139,6 +153,13 @@ final class PetController: NSObject, MTKViewDelegate {
         }
         localArdyService.onError = { [weak self] msg in
             self?.stopArdyMotionTest()
+            self?.onVMCError?(msg)
+        }
+        localMotionBricksService.onStateChanged = { [weak self] in
+            self?.onVMCStatusChanged?()
+        }
+        localMotionBricksService.onError = { [weak self] msg in
+            self?.stopMotionBricksTest()
             self?.onVMCError?(msg)
         }
     }
@@ -333,34 +354,35 @@ final class PetController: NSObject, MTKViewDelegate {
     func startTimers() {
         expressionMixer.startAutoBlink(
             rendererProvider: { [weak self] in self?.renderer },
-            isCameraActive: { [weak self] in self?.vmcReceiving ?? false }
+            isCameraActive: { [weak self] in self?.animationMixer.isFaceCaptured ?? false }
         )
     }
 
     @discardableResult
     func startVMC(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
         expressionMixer.prepareForTrackingStart(on: renderer)
-        return vmcController.start(port: port)
+        animationMixer.preferredFullBodySource = .externalVMC
+        return animationMixer.externalChannel.start(port: port)
     }
 
     func stopVMC() {
         localMotionService.stop()
-        localAudioFaceService.stop()
-        localArdyService.stop()
-        let wasActive = vmcActive
-        vmcController.stop(renderer: renderer, expressionMixer: expressionMixer)
-        if wasActive {
+        let wasActive = animationMixer.externalChannel.isListening
+        animationMixer.externalChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
+        if wasActive && !animationMixer.isFaceCaptured {
             expressionMixer.resetAfterTrackingStop(on: renderer)
+        }
+        if wasActive && !localArdyActive && !localMotionBricksActive {
             applyAllBodyAndOutfitState(settlePhysics: false)
         }
     }
 
     @discardableResult
     func startLocalMotionCapture(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
-        localAudioFaceService.stop()
-        localArdyService.stop()
         if !vmcActive || vmcController.port != port {
             guard startVMC(port: port) else { return false }
+        } else {
+            animationMixer.preferredFullBodySource = .externalVMC
         }
         let ok = localMotionService.start(port: vmcController.port)
         if !ok {
@@ -374,54 +396,79 @@ final class PetController: NSObject, MTKViewDelegate {
     }
 
     @discardableResult
-    func startAudioFaceTest(audioURL: URL? = nil, port: UInt16 = VMCTrackingController.defaultPort, maxSeconds: Double = 0) -> Bool {
-        localMotionService.stop()
-        localAudioFaceService.suppressHeadMotion = localArdyActive
-        if !vmcActive || vmcController.port != port {
-            guard startVMC(port: port) else { return false }
+    func startAudioFaceTest(audioURL: URL? = nil, maxSeconds: Double = 0) -> Bool {
+        if !animationMixer.audioFaceChannel.isListening {
+            guard animationMixer.audioFaceChannel.start(port: 0) else { return false }
         }
-        let ok = localAudioFaceService.start(audioURL: audioURL, port: vmcController.port, maxSeconds: maxSeconds)
-        if !ok && !localArdyActive {
-            stopVMC()
+        guard let boundPort = animationMixer.audioFaceChannel.boundPort else { return false }
+        expressionMixer.prepareForTrackingStart(on: renderer)
+        let ok = localAudioFaceService.start(audioURL: audioURL, port: boundPort, maxSeconds: maxSeconds)
+        if !ok {
+            animationMixer.audioFaceChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
         }
         return ok
     }
 
     func stopAudioFaceTest() {
         localAudioFaceService.stop()
-        if !localArdyActive && !localMotionActive {
-            stopVMC()
+        let wasListening = animationMixer.audioFaceChannel.isListening
+        animationMixer.audioFaceChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
+        if wasListening && !animationMixer.isFaceCaptured {
+            expressionMixer.resetAfterTrackingStop(on: renderer)
         }
     }
 
     @discardableResult
-    func startArdyMotionTest(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
-        localMotionService.stop()
-        localAudioFaceService.setHeadMotionSuppressed(true)
-        if !vmcActive || vmcController.port != port {
-            guard startVMC(port: port) else { return false }
+    func startArdyMotionTest() -> Bool {
+        // Only one AI full-body generator runs at a time; AnimationMixer SLERP-crossfades smoothly between them.
+        if localMotionBricksActive {
+            stopMotionBricksTest()
         }
-        let ok = localArdyService.start(port: vmcController.port)
-        if !ok && !localAudioFaceActive {
-            localAudioFaceService.setHeadMotionSuppressed(false)
-            stopVMC()
+        if !animationMixer.ardyChannel.isListening {
+            guard animationMixer.ardyChannel.start(port: 0) else { return false }
+        }
+        guard let boundPort = animationMixer.ardyChannel.boundPort else { return false }
+        animationMixer.preferredFullBodySource = .ardy
+        let ok = localArdyService.start(port: boundPort)
+        if !ok {
+            animationMixer.ardyChannel.stop()
         }
         return ok
     }
 
     func stopArdyMotionTest() {
         localArdyService.stop()
-        localAudioFaceService.setHeadMotionSuppressed(false)
-        if !localAudioFaceActive && !localMotionActive {
-            stopVMC()
+        animationMixer.ardyChannel.stop()
+    }
+
+    @discardableResult
+    func startMotionBricksTest() -> Bool {
+        if localArdyActive {
+            stopArdyMotionTest()
         }
+        if !animationMixer.motionBricksChannel.isListening {
+            guard animationMixer.motionBricksChannel.start(port: 0) else { return false }
+        }
+        guard let boundPort = animationMixer.motionBricksChannel.boundPort else { return false }
+        animationMixer.preferredFullBodySource = .motionBricks
+        let ok = localMotionBricksService.start(port: boundPort)
+        if !ok {
+            animationMixer.motionBricksChannel.stop()
+        }
+        return ok
+    }
+
+    func stopMotionBricksTest() {
+        localMotionBricksService.stop()
+        animationMixer.motionBricksChannel.stop()
     }
 
     func stopAllTrackingSync() {
         localMotionService.stopSync()
         localAudioFaceService.stopSync()
         localArdyService.stopSync()
-        vmcController.stop()
+        localMotionBricksService.stopSync()
+        animationMixer.stopAllChannels()
     }
 
     func setPresetMood(_ preset: VRMExpressionPreset?) {
@@ -460,31 +507,22 @@ final class PetController: NSObject, MTKViewDelegate {
         renderer.projectionMatrix = camera.projectionMatrix(aspect: aspect)
         renderer.viewMatrix = camera.viewMatrix
 
+        let dt = max(0.0, min(frameStart - lastFrameTime, 0.1))
+        lastFrameTime = frameStart
         let elapsed = Float(frameStart - startTime)
         if let model {
-            let vmcDriving = vmcController.isListening && vmcController.hasFreshFrame
-            if vmcDriving {
-                // Start from clean base pose so bones omitted by partial VMC senders (e.g. iPhone head+face only) stay natural
-                poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
-                poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
-                vmcController.apply(to: model, renderer: renderer, expressionMixer: expressionMixer)
-            } else {
-                if vmcController.isListening {
-                    // Handles clean transition when an active VMC stream goes stale
-                    vmcController.apply(to: model, renderer: renderer, expressionMixer: expressionMixer)
-                }
-                poseController.applyProceduralFrame(
-                    to: model,
-                    restTransforms: poseController.restNodeTransforms,
-                    elapsed: elapsed,
-                    idleBreathingEnabled: idleBreathingEnabled
-                )
-                expressionMixer.updateLookAt(
-                    on: renderer,
-                    poseMode: poseMode,
-                    window: view.window
-                )
-            }
+            animationMixer.evaluate(
+                model: model,
+                renderer: renderer,
+                poseController: poseController,
+                recipeStore: recipeStore,
+                expressionMixer: expressionMixer,
+                elapsed: elapsed,
+                dt: dt,
+                idleBreathingEnabled: idleBreathingEnabled,
+                poseMode: poseMode,
+                window: view.window
+            )
         }
 
         let drawProps = propRenderer.hasActiveProps
