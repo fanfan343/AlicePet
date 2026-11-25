@@ -24,6 +24,7 @@ final class PetController: NSObject, MTKViewDelegate {
     let renderer: VRMRenderer
     let propRenderer: PropSceneRenderer
     let pictureWorldRenderer: PictureWorldRenderer
+    let sceneActionController = SceneActionController()
     let recipeStore = AssetRecipeStore()
     let poseController = PoseController()
     let expressionMixer = ExpressionMixer()
@@ -158,6 +159,9 @@ final class PetController: NSObject, MTKViewDelegate {
             self?.stopArdyMotionTest()
             self?.onVMCError?(msg)
         }
+        sceneActionController.onPhaseChanged = { [weak self] in
+            self?.onPictureWorldChanged?()
+        }
     }
 
     func loadModel(from url: URL, synchronousPhysics: Bool = false) async throws {
@@ -257,6 +261,7 @@ final class PetController: NSObject, MTKViewDelegate {
     // MARK: - Picture-World (Mode B: Single-Image Metric Depth 3D Scene)
 
     func loadPictureWorld(from folderURL: URL) throws {
+        sceneActionController.reset()
         try pictureWorldRenderer.loadScene(from: folderURL)
         if let lightRaw = pictureWorldRenderer.config?.lightingPreset,
            let preset = LightingPreset(rawValue: lightRaw) {
@@ -269,11 +274,25 @@ final class PetController: NSObject, MTKViewDelegate {
 
     func exitPictureWorld() {
         guard pictureWorldRenderer.isActive else { return }
+        sceneActionController.standUpOrCancel(on: self, stopArdy: false)
         pictureWorldRenderer.unloadScene()
         restoreRestRootTransform()
         camera.reset()
         settleSpringBonePhysics(warmupSteps: 12)
         onPictureWorldChanged?()
+    }
+
+    /// Autonomous Picture-World chain: ARDY walks to `anchorId`, aligns, sits down, and holds seated Idle.
+    @discardableResult
+    func walkToSceneAnchorAndSit(anchorId: String) -> Bool {
+        guard let anchor = pictureWorldRenderer.config?.anchors?.first(where: { $0.id == anchorId }) else {
+            return false
+        }
+        return sceneActionController.startWalkAndSit(anchor: anchor, on: self)
+    }
+
+    func standUpFromSceneSeat(stopArdy: Bool = true) {
+        sceneActionController.standUpOrCancel(on: self, stopArdy: stopArdy)
     }
 
     func panPictureWorldCanvas(deltaX: Float, deltaY: Float) {
@@ -290,7 +309,11 @@ final class PetController: NSObject, MTKViewDelegate {
 
     func resetPictureWorldViewAndAvatar() {
         guard pictureWorldRenderer.isActive else { return }
+        sceneActionController.standUpOrCancel(on: self, stopArdy: false)
         pictureWorldRenderer.resetCanvasAndAvatarToOrigin()
+        if poseMode == .sit {
+            setPoseMode(.stand)
+        }
         applyPictureWorldRootTransform()
         settleSpringBonePhysics(warmupSteps: 8)
         _ = refreshSceneState(aspect: currentViewportAspect(), force: true)
@@ -328,6 +351,8 @@ final class PetController: NSObject, MTKViewDelegate {
                 activeBodyEngine: animationMixer.activeBodySource.rawValue,
                 activeFaceEngine: animationMixer.activeFaceSource.rawValue,
                 activeMotionPrompt: activePrompt,
+                activeSceneTask: sceneActionController.activeTaskIdentifier,
+                seatedAnchorId: sceneActionController.seatedAnchor?.id,
                 canvasZoom: pictureWorldRenderer.canvasZoom
             )
         } else {
@@ -348,6 +373,8 @@ final class PetController: NSObject, MTKViewDelegate {
                 activeBodyEngine: animationMixer.activeBodySource.rawValue,
                 activeFaceEngine: animationMixer.activeFaceSource.rawValue,
                 activeMotionPrompt: activePrompt,
+                activeSceneTask: nil,
+                seatedAnchorId: nil,
                 canvasZoom: 1.0
             )
         }
@@ -505,8 +532,30 @@ final class PetController: NSObject, MTKViewDelegate {
             at: animTime
         )
         applyOutfitState()
+        if pictureWorldRenderer.isActive {
+            applySeatedUprightPostureIfNeeded()
+            applyPictureWorldRootTransform()
+        }
         if settlePhysics {
             settleSpringBonePhysics()
+        }
+    }
+
+    /// Gently lifts torso & head upright when seated against a sofa/chair backrest
+    /// (Author `sit_action` leans ~30° forward for a low stool; uprighting keeps posture graceful & skirt draped).
+    func applySeatedUprightPostureIfNeeded() {
+        guard sceneActionController.seatedAnchor != nil, let model, let humanoid = model.humanoid else { return }
+        let uprightAdjust: [(VRMHumanoidBone, Float)] = [
+            (.spine, -0.26),
+            (.chest, -0.14),
+            (.head, -0.12),
+        ]
+        for (bone, pitchRad) in uprightAdjust {
+            if let idx = humanoid.getBoneNode(bone), idx < model.nodes.count {
+                let liftQ = simd_quatf(angle: pitchRad, axis: SIMD3<Float>(1, 0, 0))
+                model.nodes[idx].rotation = simd_normalize(model.nodes[idx].rotation * liftQ)
+                model.nodes[idx].updateLocalMatrix()
+            }
         }
     }
 
@@ -677,10 +726,16 @@ final class PetController: NSObject, MTKViewDelegate {
             if pictureWorldRenderer.isActive {
                 if animationMixer.activeBodySource == .ardy,
                    let rootXZ = animationMixer.ardyChannel.latestWorldRootXZ {
-                    pictureWorldRenderer.applyARDYRootMotion(worldRootXZ: rootXZ, viewportAspect: aspect)
+                    pictureWorldRenderer.applyARDYRootMotion(
+                        worldRootXZ: rootXZ,
+                        viewportAspect: aspect,
+                        goalTargetXZ: sceneActionController.activeWalkGoalXZ
+                    )
                 } else {
                     pictureWorldRenderer.resetARDYRootTracking()
                 }
+                sceneActionController.tick(dt: dt, on: self, viewportAspect: aspect)
+                applySeatedUprightPostureIfNeeded()
                 applyPictureWorldRootTransform()
             }
             _ = refreshSceneState(aspect: aspect)

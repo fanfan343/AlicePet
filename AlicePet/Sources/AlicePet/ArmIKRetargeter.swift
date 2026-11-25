@@ -181,17 +181,36 @@ enum ArmIKRetargeter {
         )
         targetRH = rh2
 
-        // Prevent left/right hands from interpenetrating during claps or close gestures
-        let minHandSeparation: Float = 0.045
-        let handVec = targetLH - targetRH
-        let handDist = simd_length(handVec)
+        // Prevent left/right hands from crossing or interpenetrating during claps & close gestures.
+        // Note: `targetLH/RH` are WRIST joints; each palm+fingers extends ~7-8cm inward when angled
+        // toward midline, so wrists need ~9.5cm signed lateral separation to let palms kiss cleanly
+        // without X-crossing through each other.
+        let srcLatSep = simd_dot(srcLH - srcRH, srcLeftAxis)
         var handsSeparated = false
-        if handDist < minHandSeparation {
-            let sepDir = (handDist > 1e-4) ? (handVec / handDist) : tgtLeftAxis
-            let push = 0.5 * (minHandSeparation - handDist)
-            targetLH += sepDir * push
-            targetRH -= sepDir * push
-            handsSeparated = true
+        let handVec = targetLH - targetRH
+        let curLatSep = simd_dot(handVec, tgtLeftAxis)
+        let handDY = abs(simd_dot(handVec, torsoUp))
+        let handDZ = abs(simd_dot(handVec, torsoFwd))
+
+        if srcLatSep >= -0.025 && handDY < 0.16 && handDZ < 0.16 {
+            // Non-crossing palm-aware clap separation along the canonical shoulder axis (+tgtLeftAxis)
+            let minClapWristSep: Float = max(0.112, tgtHalfShoulder * 1.68)
+            if curLatSep < minClapWristSep {
+                let push = 0.5 * (minClapWristSep - curLatSep)
+                targetLH += tgtLeftAxis * push
+                targetRH -= tgtLeftAxis * push
+                handsSeparated = true
+            }
+        } else {
+            let minHandSeparation: Float = 0.060
+            let handDist = simd_length(handVec)
+            if handDist < minHandSeparation {
+                let sepDir = (handDist > 1e-4) ? (handVec / handDist) : tgtLeftAxis
+                let push = 0.5 * (minHandSeparation - handDist)
+                targetLH += sepDir * push
+                targetRH -= sepDir * push
+                handsSeparated = true
+            }
         }
 
         // Solve Left & Right 2-Bone IK chains while preserving FK axial twist and wrist orientation

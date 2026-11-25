@@ -38,6 +38,10 @@ struct AvatarSceneState: Codable, Equatable, Sendable {
     let activeFaceEngine: String
     /// Current ARDY text prompt when ARDY is running, if any.
     let activeMotionPrompt: String?
+    /// Current high-level autonomous scene action (e.g. `"walking_to:left_sofa"`, `"seated_idle:left_sofa"`), if any.
+    let activeSceneTask: String?
+    /// Anchor ID Alice is currently seated at, if any.
+    let seatedAnchorId: String?
     /// Current Picture-World canvas zoom factor (`1.0` = default unzoomed view).
     let canvasZoom: Float
 

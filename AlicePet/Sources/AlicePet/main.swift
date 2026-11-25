@@ -645,6 +645,96 @@ if let snapshotPath = parseArg("--snapshot") {
                         }
                     }
                 }
+                if let seatId = parseArg("--test-walk-and-sit") {
+                    // End-to-end live ARDY -> walk to anchor -> align -> sit down -> seated Idle storyboard!
+                    guard controller.walkToSceneAnchorAndSit(anchorId: seatId) else {
+                        throw NSError(domain: "AlicePet.WalkSit", code: 80, userInfo: [NSLocalizedDescriptionKey: "Failed to start walk-and-sit for anchor '\(seatId)'"])
+                    }
+                    let outPrefix = snapshotPath.replacingOccurrences(of: ".png", with: "")
+                    var capturedMidWalk = false
+                    var capturedAlign = false
+                    let dtStep: TimeInterval = 1.0 / 30.0
+                    let simDeadline = Date().addingTimeInterval(25.0)
+                    var elapsedSim: Float = 0
+
+                    while Date() < simDeadline {
+                        if let model = controller.model {
+                            controller.animationMixer.evaluate(
+                                model: model,
+                                renderer: controller.renderer,
+                                poseController: controller.poseController,
+                                recipeStore: controller.recipeStore,
+                                expressionMixer: controller.expressionMixer,
+                                elapsed: elapsedSim,
+                                dt: dtStep,
+                                idleBreathingEnabled: true,
+                                poseMode: controller.poseMode,
+                                window: nil
+                            )
+                            if controller.animationMixer.activeBodySource == .ardy,
+                               let rootXZ = controller.animationMixer.ardyChannel.latestWorldRootXZ {
+                                controller.pictureWorldRenderer.applyARDYRootMotion(
+                                    worldRootXZ: rootXZ,
+                                    viewportAspect: snapAspect,
+                                    goalTargetXZ: controller.sceneActionController.activeWalkGoalXZ
+                                )
+                            } else {
+                                controller.pictureWorldRenderer.resetARDYRootTracking()
+                            }
+                            controller.sceneActionController.tick(dt: dtStep, on: controller, viewportAspect: snapAspect)
+                            controller.applyPictureWorldRootTransform()
+                        }
+
+                        if !capturedMidWalk, case .walkingToAnchor = controller.sceneActionController.phase,
+                           simd_length(SIMD2<Float>(controller.pictureWorldRenderer.avatarWorldPosition.x, controller.pictureWorldRenderer.avatarWorldPosition.z)) > 0.30 {
+                            capturedMidWalk = true
+                            controller.settleSpringBonePhysics(warmupSteps: 8)
+                            try await controller.renderSnapshot(to: URL(fileURLWithPath: "\(outPrefix)_1_walk.png"), width: 1280, height: 848, applyBaseState: false)
+                            print("WalkSit Stage 1 (walking): pos=\(controller.pictureWorldRenderer.avatarWorldPosition) yaw=\(String(format: "%.1f°", controller.pictureWorldRenderer.avatarWorldYaw * 180 / .pi))")
+                        }
+                        if !capturedAlign, case .aligningToAnchor = controller.sceneActionController.phase {
+                            capturedAlign = true
+                            controller.settleSpringBonePhysics(warmupSteps: 8)
+                            try await controller.renderSnapshot(to: URL(fileURLWithPath: "\(outPrefix)_2_arrive.png"), width: 1280, height: 848, applyBaseState: false)
+                            print("WalkSit Stage 2 (arrived & turning): pos=\(controller.pictureWorldRenderer.avatarWorldPosition) yaw=\(String(format: "%.1f°", controller.pictureWorldRenderer.avatarWorldYaw * 180 / .pi))")
+                        }
+                        if case .seatedIdle = controller.sceneActionController.phase {
+                            // Tick 15 more frames so 0.35s SLERP crossfade finishes completely into seated Idle!
+                            for _ in 0..<18 {
+                                elapsedSim += Float(dtStep)
+                                if let model = controller.model {
+                                    controller.animationMixer.evaluate(
+                                        model: model,
+                                        renderer: controller.renderer,
+                                        poseController: controller.poseController,
+                                        recipeStore: controller.recipeStore,
+                                        expressionMixer: controller.expressionMixer,
+                                        elapsed: elapsedSim,
+                                        dt: dtStep,
+                                        idleBreathingEnabled: true,
+                                        poseMode: controller.poseMode,
+                                        window: nil
+                                    )
+                                    controller.applySeatedUprightPostureIfNeeded()
+                                    controller.applyPictureWorldRootTransform()
+                                }
+                            }
+                            controller.settleSpringBonePhysics(warmupSteps: 32)
+                            if let json = controller.currentAvatarSceneState(aspect: snapAspect).toJSONString(pretty: false) {
+                                print("WalkSit Stage 3 (Seated Idle) AvatarSceneState:", json)
+                            }
+                            try await controller.renderSnapshot(to: URL(fileURLWithPath: snapshotPath), width: 1280, height: 848, applyBaseState: false)
+                            print("WalkSit Stage 3 (Seated Idle) saved to \(snapshotPath)")
+                            controller.stopAllTrackingSync()
+                            done = true
+                            return
+                        }
+                        elapsedSim += Float(dtStep)
+                        try await Task.sleep(nanoseconds: 33_000_000)
+                    }
+                    controller.stopAllTrackingSync()
+                    throw NSError(domain: "AlicePet.WalkSit", code: 81, userInfo: [NSLocalizedDescriptionKey: "Walk-and-sit timed out in phase \(controller.sceneActionController.phase)"])
+                }
                 if let json = controller.currentAvatarSceneState(aspect: snapAspect).toJSONString(pretty: false) {
                     print("AvatarSceneState:", json)
                 }

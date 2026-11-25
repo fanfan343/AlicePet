@@ -16,18 +16,23 @@ esac
 
 cd "$SCRIPT_DIR"
 
-# Ensure VRMMetalKit has our PerfectSync 64-active-morph patch applied cleanly
-PATCH_FILE="$SCRIPT_DIR/patches/VRMMetalKit-perfectsync-morphs.patch"
+# Ensure VRMMetalKit has our PerfectSync 64-active-morph & SpringBone warmup patches applied cleanly
+PATCH_MORPH="$SCRIPT_DIR/patches/VRMMetalKit-perfectsync-morphs.patch"
+PATCH_WARMUP="$SCRIPT_DIR/patches/VRMMetalKit-springbone-warmup-binddirs.patch"
 EDIT_DIR="$SCRIPT_DIR/Packages/VRMMetalKit"
-if [ -f "$PATCH_FILE" ]; then
+if [ -f "$PATCH_MORPH" ] || [ -f "$PATCH_WARMUP" ]; then
     if [ ! -d "$EDIT_DIR/Sources" ] || ! grep -q '"name" : "edited"' "$SCRIPT_DIR/.build/workspace-state.json" 2>/dev/null; then
         rm -rf "$EDIT_DIR"
-        echo "[AlicePet] Checking out editable VRMMetalKit for PerfectSync morph patch..."
+        echo "[AlicePet] Checking out editable VRMMetalKit for patches..."
         swift package edit VRMMetalKit
     fi
-    if ! grep -q "public static let maxActiveMorphs: Int = 64" "$EDIT_DIR/Sources/VRMMetalKit/Core/VRMConstants.swift"; then
+    if [ -f "$PATCH_MORPH" ] && ! grep -q "public static let maxActiveMorphs: Int = 64" "$EDIT_DIR/Sources/VRMMetalKit/Core/VRMConstants.swift"; then
         echo "[AlicePet] Applying VRMMetalKit PerfectSync morph limits patch..."
-        git -C "$EDIT_DIR" apply "$PATCH_FILE"
+        git -C "$EDIT_DIR" apply "$PATCH_MORPH"
+    fi
+    if [ -f "$PATCH_WARMUP" ] && ! grep -q "Step 1.5: Refresh world-space bind directions" "$EDIT_DIR/Sources/VRMMetalKit/SpringBoneComputeSystem.swift"; then
+        echo "[AlicePet] Applying VRMMetalKit SpringBone warmup world bind directions patch..."
+        git -C "$EDIT_DIR" apply "$PATCH_WARMUP"
     fi
 fi
 

@@ -1,0 +1,26 @@
+diff --git a/Sources/VRMMetalKit/SpringBoneComputeSystem.swift b/Sources/VRMMetalKit/SpringBoneComputeSystem.swift
+index e380286f..30f152b1 100644
+--- a/Sources/VRMMetalKit/SpringBoneComputeSystem.swift
++++ b/Sources/VRMMetalKit/SpringBoneComputeSystem.swift
+@@ -3399,6 +3399,21 @@ final class SpringBoneComputeSystem: @unchecked Sendable {
+             }
+         }
+ 
++        // Step 1.5: Refresh world-space bind directions, root positions, and colliders
++        // for the current posed/rotated skeleton BEFORE seeding kinematic positions or
++        // dispatching XPBD stiffness steps. Otherwise warmup after a root yaw turn or
++        // pose switch pulls hair/cloth toward stale load-time bind directions.
++        captureTargetWorldBindDirections()
++        previousWorldBindDirections = targetWorldBindDirections
++        if !targetWorldBindDirections.isEmpty {
++            buffers.updateBindDirections(targetWorldBindDirections)
++        }
++        targetRootPositions = animatedPositions
++        previousRootPositions = animatedPositions
++        lastRootPositions = animatedPositions
++        captureTargetColliderTransforms()
++        requestPhysicsReset = false
++
+         // Step 2: Reset physics state to current animated positions (zeros velocity)
+         resetPhysicsState(model: model, buffers: buffers, animatedPositions: animatedPositions)
+ 

@@ -600,6 +600,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openSceneItem.target = self
         sceneMenu.addItem(openSceneItem)
         if controller.isPictureWorldActive {
+            if let anchors = controller.pictureWorldRenderer.config?.anchors, !anchors.isEmpty {
+                sceneMenu.addItem(.separator())
+                for anchor in anchors where anchor.kind == "seat" {
+                    let isSeatedHere = (controller.sceneActionController.seatedAnchor?.id == anchor.id)
+                    let isWalkingHere = (controller.sceneActionController.activeTaskIdentifier == "walking_to:\(anchor.id)")
+                    let title: String
+                    if isSeatedHere {
+                        title = "已就座保持待机 · \(anchor.label)"
+                    } else if isWalkingHere {
+                        title = "正在走去坐下 · \(anchor.label)…"
+                    } else {
+                        title = "ARDY 走过去坐下 → \(anchor.label)"
+                    }
+                    let seatItem = NSMenuItem(title: title, action: #selector(walkToSceneSeat(_:)), keyEquivalent: "")
+                    seatItem.target = self
+                    seatItem.representedObject = anchor.id
+                    seatItem.state = (isSeatedHere || isWalkingHere) ? .on : .off
+                    sceneMenu.addItem(seatItem)
+                }
+                if controller.sceneActionController.phase != .idle {
+                    let standItem = NSMenuItem(title: "起身 / 取消当前移动", action: #selector(standUpFromSceneSeat), keyEquivalent: "")
+                    standItem.target = self
+                    sceneMenu.addItem(standItem)
+                }
+            }
+            sceneMenu.addItem(.separator())
             let hintItem = NSMenuItem(title: "提示：滚轮缩放、中键平移画布，双击回到原点", action: nil, keyEquivalent: "")
             hintItem.isEnabled = false
             sceneMenu.addItem(hintItem)
@@ -787,6 +813,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             panel.onSendPrompt = { [weak self] prompt, cfg in
                 guard let self else { return }
+                if self.controller.sceneActionController.phase != .idle {
+                    self.controller.standUpFromSceneSeat(stopArdy: false)
+                }
                 self.controller.localArdyService.sendLivePrompt(prompt, cfg: cfg)
                 if !self.controller.localArdyActive {
                     _ = self.controller.startArdyMotionTest()
@@ -1076,6 +1105,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func exitPictureWorldMode() {
         controller.exitPictureWorld()
+    }
+
+    @objc private func walkToSceneSeat(_ sender: NSMenuItem) {
+        guard let anchorId = sender.representedObject as? String else { return }
+        _ = controller.walkToSceneAnchorAndSit(anchorId: anchorId)
+    }
+
+    @objc private func standUpFromSceneSeat() {
+        controller.standUpFromSceneSeat(stopArdy: true)
     }
 
     @objc private func selectPictureWorldScene(_ sender: NSMenuItem) {

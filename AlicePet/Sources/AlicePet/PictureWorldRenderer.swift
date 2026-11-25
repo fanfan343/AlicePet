@@ -5,6 +5,27 @@ import Metal
 import MetalKit
 import simd
 
+struct SceneAnchor: Codable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let kind: String // "seat" | "stand_spot"
+    let approachPosition: [Float]
+    let targetPosition: [Float]
+    let seatHeight: Float?
+    let facingYawRad: Float
+
+    var approachPos: SIMD3<Float> {
+        approachPosition.count == 3
+            ? SIMD3<Float>(approachPosition[0], approachPosition[1], approachPosition[2])
+            : .zero
+    }
+    var targetPos: SIMD3<Float> {
+        targetPosition.count == 3
+            ? SIMD3<Float>(targetPosition[0], targetPosition[1], targetPosition[2])
+            : approachPos
+    }
+}
+
 struct PictureWorldSceneConfig: Codable {
     let version: Int
     let name: String
@@ -24,6 +45,7 @@ struct PictureWorldSceneConfig: Codable {
     let nearClip: Float?
     let farClip: Float?
     let lightingPreset: String?
+    let anchors: [SceneAnchor]?
 
     var camPos: SIMD3<Float> { vec3(cameraPosition, fallback: SIMD3<Float>(0, 1.35, 2.8)) }
     var camTarget: SIMD3<Float> { vec3(cameraTarget, fallback: SIMD3<Float>(0, 1.0, 0)) }
@@ -274,9 +296,14 @@ final class PictureWorldRenderer {
 
     /// Integrates continuous ARDY root XZ displacement (meters) onto the Picture-World floor while
     /// enforcing BOTH the scene `walkBounds` and the unzoomed base camera-frustum visibility guard.
-    /// When Alice touches a boundary while walking outward, gently steers `avatarWorldYaw` inward
-    /// toward the room center so ARDY footsteps curve cleanly back into the room instead of getting stuck.
-    func applyARDYRootMotion(worldRootXZ: SIMD2<Float>, viewportAspect: Float) {
+    /// When `goalTargetXZ` is supplied (goal-directed navigation), smoothly steers `avatarWorldYaw`
+    /// toward the destination so ARDY footsteps walk Alice directly there. Otherwise, when Alice
+    /// touches a boundary while walking outward, gently steers inward back into the room.
+    func applyARDYRootMotion(
+        worldRootXZ: SIMD2<Float>,
+        viewportAspect: Float,
+        goalTargetXZ: SIMD2<Float>? = nil
+    ) {
         guard isActive else { return }
         guard let prev = lastARDYRootXZ else {
             lastARDYRootXZ = worldRootXZ
@@ -296,12 +323,42 @@ final class PictureWorldRenderer {
             return SIMD2<Float>(rawDelta.x * cy + rawDelta.y * sy, -rawDelta.x * sy + rawDelta.y * cy)
         }
 
+        // Goal-directed steering: rotate world yaw smoothly so ARDY's walking step heads straight to goalTargetXZ
+        if let goal = goalTargetXZ {
+            let toGoal = goal - SIMD2<Float>(avatarWorldPosition.x, avatarWorldPosition.z)
+            let distToGoal = simd_length(toGoal)
+            if distToGoal > 0.03 {
+                let desiredDir = toGoal / distToGoal
+                let currentStep = rotateStep(avatarWorldYaw)
+                let stepDir = currentStep / max(stepLen, 1e-5)
+                let curAngle = atan2(stepDir.x, stepDir.y)
+                let targetAngle = atan2(desiredDir.x, desiredDir.y)
+                var angleDiff = targetAngle - curAngle
+                while angleDiff > .pi { angleDiff -= 2 * .pi }
+                while angleDiff < -.pi { angleDiff += 2 * .pi }
+
+                let maxTurn = min(0.28, stepLen * 6.5 + 0.05)
+                let turnStep = min(max(angleDiff, -maxTurn), maxTurn)
+                avatarWorldYaw += turnStep
+                if avatarWorldYaw > .pi { avatarWorldYaw -= 2 * .pi }
+                if avatarWorldYaw < -.pi { avatarWorldYaw += 2 * .pi }
+            }
+        }
+
         var worldStep = rotateStep(avatarWorldYaw)
+        if let goal = goalTargetXZ {
+            // Avoid overshooting the approach spot on the final step
+            let toGoal = goal - SIMD2<Float>(avatarWorldPosition.x, avatarWorldPosition.z)
+            let dist = simd_length(toGoal)
+            if dist < stepLen && dist > 1e-4 {
+                worldStep = toGoal
+            }
+        }
         let candidate = SIMD3<Float>(avatarWorldPosition.x + worldStep.x, 0.0, avatarWorldPosition.z + worldStep.y)
         let eval = clampAvatarPositionWithContacts(candidate, viewportAspect: viewportAspect)
 
-        // Smooth inward turn-back steering whenever Alice hits or approaches a wall while walking outward
-        if (!eval.contacts.isEmpty || eval.isNearBoundary), simd_length(eval.inwardNormal) > 0.01 {
+        // Smooth inward turn-back steering in free-roam mode whenever Alice hits or approaches a wall
+        if goalTargetXZ == nil, (!eval.contacts.isEmpty || eval.isNearBoundary), simd_length(eval.inwardNormal) > 0.01 {
             let stepDir = worldStep / max(stepLen, 1e-5)
             let inwardDot = simd_dot(stepDir, eval.inwardNormal)
             if !eval.contacts.isEmpty || inwardDot < 0.25 {
