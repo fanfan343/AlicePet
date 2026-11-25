@@ -5,7 +5,9 @@ import Foundation
 struct LocalCameraChoice {
     let index: Int
     let name: String
+    let uniqueID: String
     let isContinuity: Bool
+    let isBuiltIn: Bool
 
     var displayTitle: String {
         isContinuity ? "\(name)（连续互通·仅后置）" : name
@@ -28,7 +30,7 @@ enum MotionPoseModelTier: String, CaseIterable {
 /// Stopping or quitting terminates the child process directly, guaranteeing 100% camera & memory release.
 @MainActor
 final class LocalMotionService {
-    var cameraIndex: Int = 0
+    var selectedCameraUniqueID: String?
     var enableBody: Bool = true
     var enableHands: Bool = true
     var mirrorMode: Bool = true
@@ -43,6 +45,8 @@ final class LocalMotionService {
     var onStateChanged: (() -> Void)?
     var onError: ((String) -> Void)?
 
+    /// Matches OpenCV's macOS CAP_AVFOUNDATION enumeration order (`cap_avfoundation_mac.mm`),
+    /// which sorts AVCaptureDevices alphabetically by `uniqueID`.
     static func availableCameras() -> [LocalCameraChoice] {
         var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera, .external]
         if #available(macOS 14.0, *) {
@@ -53,15 +57,37 @@ final class LocalMotionService {
             mediaType: .video,
             position: .unspecified
         )
-        return session.devices.enumerated().map { idx, dev in
+        let sorted = session.devices.sorted { $0.uniqueID < $1.uniqueID }
+        return sorted.enumerated().map { idx, dev in
+            let isBuiltIn = (dev.deviceType == .builtInWideAngleCamera)
             let isCont: Bool
             if #available(macOS 14.0, *) {
                 isCont = (dev.deviceType == .continuityCamera) || dev.localizedName.localizedCaseInsensitiveContains("iPhone")
             } else {
                 isCont = dev.localizedName.localizedCaseInsensitiveContains("iPhone")
             }
-            return LocalCameraChoice(index: idx, name: dev.localizedName, isContinuity: isCont)
+            return LocalCameraChoice(
+                index: idx,
+                name: dev.localizedName,
+                uniqueID: dev.uniqueID,
+                isContinuity: isCont,
+                isBuiltIn: isBuiltIn
+            )
         }
+    }
+
+    /// Resolves the live OpenCV camera index for the selected camera (preferring built-in Mac camera by default
+    /// so connecting/disconnecting an iPhone Continuity Camera never swaps indices unexpectedly).
+    func resolvedCameraIndex() -> Int {
+        let cameras = Self.availableCameras()
+        if let uid = selectedCameraUniqueID,
+           let matched = cameras.first(where: { $0.uniqueID == uid }) {
+            return matched.index
+        }
+        if let builtIn = cameras.first(where: { $0.isBuiltIn }) {
+            return builtIn.index
+        }
+        return 0
     }
 
     static func resolveServiceDirectory() -> URL? {
@@ -110,6 +136,7 @@ final class LocalMotionService {
             return false
         }
 
+        let resolvedIndex = resolvedCameraIndex()
         let proc = Process()
         proc.executableURL = pythonURL
         proc.currentDirectoryURL = serviceDir
@@ -117,7 +144,7 @@ final class LocalMotionService {
             "tracker.py",
             "--host", "127.0.0.1",
             "--port", String(port),
-            "--camera", String(max(0, cameraIndex)),
+            "--camera", String(max(0, resolvedIndex)),
             "--fps", "30",
             "--body", enableBody ? "1" : "0",
             "--hands", enableHands ? "1" : "0",
@@ -174,7 +201,7 @@ final class LocalMotionService {
                 if wasRunning && reason == .exit && code != 0 {
                     let msg: String
                     if code == 3 {
-                        msg = "无法打开所选摄像头（索引 \(self.cameraIndex)），请检查系统摄像头权限或切换摄像头。"
+                        msg = "无法打开所选摄像头（索引 \(resolvedIndex)），请检查系统摄像头权限或切换摄像头。"
                     } else {
                         msg = "本机 MediaPipe 捕捉服务异常退出（code=\(code)），详情见 alicepet.log。"
                     }
@@ -191,7 +218,7 @@ final class LocalMotionService {
             self.isRunning = true
             AppLogger.shared.info(
                 "Motion",
-                "Launched local MediaPipe tracker (pid=\(proc.processIdentifier), port=\(port), camera=\(cameraIndex), body=\(enableBody), hands=\(enableHands), mirror=\(mirrorMode), pose=\(poseModel.rawValue))"
+                "Launched local MediaPipe tracker (pid=\(proc.processIdentifier), port=\(port), camera=\(resolvedIndex), body=\(enableBody), hands=\(enableHands), mirror=\(mirrorMode), pose=\(poseModel.rawValue))"
             )
             onStateChanged?()
             return true

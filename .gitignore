@@ -27,6 +27,7 @@ services/**/*.bin
 services/**/*.onnx
 services/**/*.onnx.data
 services/**/*.m4a
+services/ardy/models/
 services/**/*.pt
 services/**/*.ckpt
 services/**/*.task

@@ -1,0 +1,12 @@
+[project]
+name = "alicepet-ardy"
+version = "0.1.0"
+description = "ARDY Mini (distilled MiniLM + ARDY-Core40 ONNX) real-time 20fps streaming text-to-motion VMC/OSC engine for AlicePet"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "huggingface-hub>=0.24.0",
+    "numpy>=1.26.0",
+    "onnxruntime>=1.19.0",
+    "python-osc>=1.9.0",
+    "tokenizers>=0.20.0",
+]

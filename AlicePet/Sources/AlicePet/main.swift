@@ -32,7 +32,8 @@ func resolveInitialModelURL(isHeadlessSnapshot: Bool) -> URL {
 let vmcLoopbackPath = parseArg("--test-vmc-loopback")
 let motionServiceTestPath = parseArg("--test-motion-service")
 let audioFaceTestPath = parseArg("--test-audio2face")
-let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil) || (motionServiceTestPath != nil) || (audioFaceTestPath != nil)
+let ardyTestPath = parseArg("--test-ardy")
+let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil) || (motionServiceTestPath != nil) || (audioFaceTestPath != nil) || (ardyTestPath != nil)
 let modelURL = resolveInitialModelURL(isHeadlessSnapshot: isSnapshotMode)
 
 func sendLoopbackUDP(_ data: Data, toPort port: UInt16) throws {
@@ -262,6 +263,62 @@ if let audioOutputPath = audioFaceTestPath {
             controller.stopAllTrackingSync()
         } catch {
             fputs("Audio2Face E2E error: \(error)\n", stderr)
+            exitCode = 1
+        }
+        done = true
+    }
+    while !done {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+    }
+    exit(exitCode)
+}
+
+if let ardyOutputPath = ardyTestPath {
+    var done = false
+    var exitCode: Int32 = 0
+    Task { @MainActor in
+        do {
+            let controller = try PetController(sampleCount: 1)
+            try await controller.loadModel(from: modelURL, synchronousPhysics: true)
+            controller.camera.apply(preset: .fullBody)
+
+            guard controller.startVMC(port: 0), let boundPort = controller.vmcController.boundPort else {
+                throw NSError(domain: "AlicePet.ARDY", code: 40, userInfo: [NSLocalizedDescriptionKey: "Failed to bind VMC port"])
+            }
+            guard let serviceDir = LocalArdyService.resolveServiceDirectory() else {
+                throw NSError(domain: "AlicePet.ARDY", code: 41, userInfo: [NSLocalizedDescriptionKey: "services/ardy directory not found"])
+            }
+            let prompt = parseArg("--prompt") ?? "a person stands and waves cheerfully with their right hand"
+            let proc = Process()
+            proc.executableURL = serviceDir.appendingPathComponent(".venv/bin/python")
+            proc.currentDirectoryURL = serviceDir
+            proc.arguments = ["ardy_vmc.py", "--self-test", "--prompt", prompt, "--host", "127.0.0.1", "--port", String(boundPort)]
+            proc.standardInput = FileHandle.nullDevice
+            try proc.run()
+
+            let deadline = Date().addingTimeInterval(60.0)
+            while (controller.vmcController.packetCount == 0 || proc.isRunning) && Date() < deadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0, controller.vmcController.packetCount > 0, let model = controller.model else {
+                throw NSError(domain: "AlicePet.ARDY", code: 42, userInfo: [NSLocalizedDescriptionKey: "ARDY self-test failed (status=\(proc.terminationStatus), packets=\(controller.vmcController.packetCount))"])
+            }
+
+            controller.poseController.applyBasePose(to: model, restTransforms: controller.poseController.restNodeTransforms)
+            let applied = controller.vmcController.apply(
+                to: model,
+                renderer: controller.renderer,
+                expressionMixer: controller.expressionMixer
+            )
+            controller.settleSpringBonePhysics(warmupSteps: 16)
+            print("ARDY E2E OK: port=\(boundPort) packets=\(controller.vmcController.packetCount) bones=\(controller.vmcController.receivedBoneCount) applied=\(applied)")
+
+            try await controller.renderSnapshot(to: URL(fileURLWithPath: ardyOutputPath), applyBaseState: false)
+            print("ARDY E2E snapshot saved to \(ardyOutputPath)")
+            controller.stopAllTrackingSync()
+        } catch {
+            fputs("ARDY E2E error: \(error)\n", stderr)
             exitCode = 1
         }
         done = true

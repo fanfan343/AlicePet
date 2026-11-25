@@ -2,18 +2,18 @@ import AppKit
 import Foundation
 
 struct AudioLipSyncParams: Codable, Equatable {
-    var jawGain: Double = 2.85
-    var vowelGain: Double = 1.60
-    var lipCloseStrength: Double = 0.55
-    var lipRevealGain: Double = 0.60
-    var smoothing: Double = 0.32
-    var upperFaceGain: Double = 1.00
-    var headMotionGain: Double = 1.00
+    var jawGain: Double = 3.00
+    var vowelGain: Double = 2.50
+    var lipCloseStrength: Double = 1.50
+    var lipRevealGain: Double = 1.50
+    var smoothing: Double = 0.00
+    var upperFaceGain: Double = 1.50
+    var headMotionGain: Double = 1.40
     var syncOffsetMs: Double = 0.0
     var naturalBlinks: Bool = true
     var loopPlayback: Bool = true
 
-    private static let defaultsKey = "labAudioLipSyncParamsV1"
+    private static let defaultsKey = "labAudioLipSyncParamsV2"
 
     static func loadFromDefaults() -> AudioLipSyncParams {
         guard let data = UserDefaults.standard.data(forKey: defaultsKey),
@@ -75,8 +75,8 @@ enum AudioLipSyncPreset: String, CaseIterable {
         switch self {
         case .animeStandard:
             return AudioLipSyncParams(
-                jawGain: 2.85, vowelGain: 1.60, lipCloseStrength: 0.55, lipRevealGain: 0.60,
-                smoothing: 0.32, upperFaceGain: 1.00, headMotionGain: 1.00,
+                jawGain: 3.00, vowelGain: 2.50, lipCloseStrength: 1.50, lipRevealGain: 1.50,
+                smoothing: 0.00, upperFaceGain: 1.50, headMotionGain: 1.40,
                 syncOffsetMs: offsetMs, naturalBlinks: true, loopPlayback: loop
             )
         case .energetic:

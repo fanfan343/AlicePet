@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controller: PetController!
     private var statusItem: NSStatusItem!
     private var lipSyncTuningPanel: AudioLipSyncTuningPanel?
+    private var ardyLabPanel: ArdyLabPanel?
 
     private var isClickThrough: Bool = false
     private var isAlwaysOnTop: Bool = true
@@ -21,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let motionHandsKey = "localMotionEnableHands"
     private let motionMirrorKey = "localMotionMirrorMode"
     private let motionPoseTierKey = "localMotionPoseTier"
-    private let motionCameraIndexKey = "localMotionCameraIndex"
+    private let motionCameraUniqueIDKey = "localMotionCameraUniqueID"
     nonisolated static let lastModelPathKey = "lastOpenedVRMModelPath"
 
     private var preferredVMCPort: UInt16 {
@@ -75,8 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                let tier = MotionPoseModelTier(rawValue: tierRaw) {
                 controller.localMotionService.poseModel = tier
             }
-            if defaults.object(forKey: motionCameraIndexKey) != nil {
-                controller.localMotionService.cameraIndex = max(0, defaults.integer(forKey: motionCameraIndexKey))
+            if let savedCamUID = defaults.string(forKey: motionCameraUniqueIDKey), !savedCamUID.isEmpty {
+                controller.localMotionService.selectedCameraUniqueID = savedCamUID
             }
         } catch {
             AppLogger.shared.error("App", "Failed to initialize Metal/VRMMetalKit: \(error)")
@@ -140,7 +141,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.controller.localAudioFaceActive,
                 audioName: self.controller.localAudioFaceService.activeAudioName
             )
+            self.ardyLabPanel?.setRunningState(
+                self.controller.localArdyActive,
+                status: self.controller.localArdyService.lastStatusLine
+            )
             self.refreshMenus()
+        }
+        controller.localArdyService.onStatusLine = { [weak self] line in
+            guard let self else { return }
+            self.ardyLabPanel?.setRunningState(self.controller.localArdyActive, status: line)
         }
         controller.onVMCError = { [weak self] message in
             self?.updateStatusBarTitle()
@@ -178,7 +187,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusBarTitle() {
-        if controller.localAudioFaceActive {
+        if controller.localArdyActive && controller.localAudioFaceActive {
+            statusItem.button?.title = "AlicePet · 💃🗣️"
+        } else if controller.localArdyActive {
+            statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 💃" : "AlicePet · 💃(生成中)"
+        } else if controller.localAudioFaceActive {
             statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 🗣️" : "AlicePet · 🗣️(推理中)"
         } else if controller.localMotionActive {
             statusItem.button?.title = controller.vmcReceiving ? "AlicePet · 🎭" : "AlicePet · 🎭(启动中)"
@@ -231,6 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Camera & Pose model quality nested submenu
         let deviceMenu = NSMenu()
         let cameras = LocalMotionService.availableCameras()
+        let resolvedIdx = controller.localMotionService.resolvedCameraIndex()
         if cameras.isEmpty {
             let emptyItem = NSMenuItem(title: "未检测到摄像头（默认索引 0）", action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
@@ -239,8 +253,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for cam in cameras {
                 let item = NSMenuItem(title: "[\(cam.index)] \(cam.displayTitle)", action: #selector(selectLocalMotionCamera(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = cam.index
-                item.state = (controller.localMotionService.cameraIndex == cam.index) ? .on : .off
+                item.representedObject = cam.uniqueID
+                item.state = (resolvedIdx == cam.index) ? .on : .off
                 deviceMenu.addItem(item)
             }
         }
@@ -538,6 +552,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Experimental / Lab Features Submenu (tests live here until promoted to main menu)
         let labMenu = NSMenu()
+        let openArdyItem = NSMenuItem(
+            title: controller.localArdyActive ? "打开 ARDY 文本动作面板… (运行中)" : "打开 ARDY 文本生成动作面板… (20fps)",
+            action: #selector(openLabArdyPanel),
+            keyEquivalent: ""
+        )
+        openArdyItem.target = self
+        openArdyItem.state = controller.localArdyActive ? .on : .off
+        labMenu.addItem(openArdyItem)
+
         let openTuningItem = NSMenuItem(title: "打开口型与表情实时调参面板…", action: #selector(openLabLipSyncTuningPanel), keyEquivalent: "")
         openTuningItem.target = self
         labMenu.addItem(openTuningItem)
@@ -556,11 +579,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         labMenu.addItem(customAudioItem)
 
         labMenu.addItem(.separator())
-        let labInfoItem = NSMenuItem(title: "引擎：LAM_Audio2Expression (INT8 ONNX · 52 通道)", action: nil, keyEquivalent: "")
+        let labInfoItem = NSMenuItem(title: "提示：ARDY 全身动作与 LAM 语音对口型可同时开启", action: nil, keyEquivalent: "")
         labInfoItem.isEnabled = false
         labMenu.addItem(labInfoItem)
 
-        let labRootTitle = controller.localAudioFaceActive ? "测试功能 (Lab · 运行中)" : "测试功能 (Lab)"
+        let anyLabRunning = controller.localAudioFaceActive || controller.localArdyActive
+        let labRootTitle = anyLabRunning ? "测试功能 (Lab · 运行中)" : "测试功能 (Lab)"
         let labRoot = NSMenuItem(title: labRootTitle, action: nil, keyEquivalent: "")
         labRoot.submenu = labMenu
         menu.addItem(labRoot)
@@ -629,9 +653,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func selectLocalMotionCamera(_ sender: NSMenuItem) {
-        guard let idx = sender.representedObject as? Int else { return }
-        controller.localMotionService.cameraIndex = max(0, idx)
-        UserDefaults.standard.set(controller.localMotionService.cameraIndex, forKey: motionCameraIndexKey)
+        guard let uid = sender.representedObject as? String else { return }
+        controller.localMotionService.selectedCameraUniqueID = uid
+        UserDefaults.standard.set(uid, forKey: motionCameraUniqueIDKey)
         restartLocalMotionIfRunning()
         refreshMenus()
     }
@@ -677,6 +701,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openLogFolder() {
         NSWorkspace.shared.activateFileViewerSelecting([AppLogger.shared.logFileURL])
+    }
+
+    @objc private func openLabArdyPanel() {
+        if ardyLabPanel == nil {
+            let panel = ArdyLabPanel(
+                initialPrompt: controller.localArdyService.currentPrompt,
+                initialCfg: controller.localArdyService.cfgWeight
+            )
+            panel.onToggleStartStop = { [weak self] in
+                guard let self else { return }
+                if self.controller.localArdyActive {
+                    self.controller.stopArdyMotionTest()
+                } else {
+                    _ = self.controller.startArdyMotionTest(port: self.preferredVMCPort)
+                }
+                self.updateStatusBarTitle()
+                self.ardyLabPanel?.setRunningState(
+                    self.controller.localArdyActive,
+                    status: self.controller.localArdyService.lastStatusLine
+                )
+                self.refreshMenus()
+            }
+            panel.onSendPrompt = { [weak self] prompt, cfg in
+                guard let self else { return }
+                self.controller.localArdyService.sendLivePrompt(prompt, cfg: cfg)
+                if !self.controller.localArdyActive {
+                    _ = self.controller.startArdyMotionTest(port: self.preferredVMCPort)
+                    self.updateStatusBarTitle()
+                    self.refreshMenus()
+                }
+                self.ardyLabPanel?.setRunningState(
+                    self.controller.localArdyActive,
+                    status: "已下发动作指令：\(prompt)"
+                )
+            }
+            ardyLabPanel = panel
+        }
+        ardyLabPanel?.setRunningState(
+            controller.localArdyActive,
+            status: controller.localArdyService.lastStatusLine
+        )
+        ardyLabPanel?.show()
     }
 
     @objc private func openLabLipSyncTuningPanel() {

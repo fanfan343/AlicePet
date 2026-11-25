@@ -29,6 +29,7 @@ final class PetController: NSObject, MTKViewDelegate {
     let vmcController = VMCTrackingController()
     let localMotionService = LocalMotionService()
     let localAudioFaceService = LocalAudioFaceService()
+    let localArdyService = LocalArdyService()
 
     private(set) var model: VRMModel?
     private(set) var loadedModelURL: URL?
@@ -74,6 +75,7 @@ final class PetController: NSObject, MTKViewDelegate {
     var vmcReceiving: Bool { vmcController.isReceivingFrames }
     var localMotionActive: Bool { localMotionService.isRunning }
     var localAudioFaceActive: Bool { localAudioFaceService.isRunning }
+    var localArdyActive: Bool { localArdyService.isRunning }
     var onVMCStatusChanged: (() -> Void)?
     var onVMCError: ((String) -> Void)?
 
@@ -130,6 +132,13 @@ final class PetController: NSObject, MTKViewDelegate {
         }
         localAudioFaceService.onError = { [weak self] msg in
             self?.stopAudioFaceTest()
+            self?.onVMCError?(msg)
+        }
+        localArdyService.onStateChanged = { [weak self] in
+            self?.onVMCStatusChanged?()
+        }
+        localArdyService.onError = { [weak self] msg in
+            self?.stopArdyMotionTest()
             self?.onVMCError?(msg)
         }
     }
@@ -337,6 +346,7 @@ final class PetController: NSObject, MTKViewDelegate {
     func stopVMC() {
         localMotionService.stop()
         localAudioFaceService.stop()
+        localArdyService.stop()
         let wasActive = vmcActive
         vmcController.stop(renderer: renderer, expressionMixer: expressionMixer)
         if wasActive {
@@ -348,6 +358,7 @@ final class PetController: NSObject, MTKViewDelegate {
     @discardableResult
     func startLocalMotionCapture(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
         localAudioFaceService.stop()
+        localArdyService.stop()
         if !vmcActive || vmcController.port != port {
             guard startVMC(port: port) else { return false }
         }
@@ -369,19 +380,43 @@ final class PetController: NSObject, MTKViewDelegate {
             guard startVMC(port: port) else { return false }
         }
         let ok = localAudioFaceService.start(audioURL: audioURL, port: vmcController.port, maxSeconds: maxSeconds)
-        if !ok {
+        if !ok && !localArdyActive {
             stopVMC()
         }
         return ok
     }
 
     func stopAudioFaceTest() {
-        stopVMC()
+        localAudioFaceService.stop()
+        if !localArdyActive && !localMotionActive {
+            stopVMC()
+        }
+    }
+
+    @discardableResult
+    func startArdyMotionTest(port: UInt16 = VMCTrackingController.defaultPort) -> Bool {
+        localMotionService.stop()
+        if !vmcActive || vmcController.port != port {
+            guard startVMC(port: port) else { return false }
+        }
+        let ok = localArdyService.start(port: vmcController.port)
+        if !ok && !localAudioFaceActive {
+            stopVMC()
+        }
+        return ok
+    }
+
+    func stopArdyMotionTest() {
+        localArdyService.stop()
+        if !localAudioFaceActive && !localMotionActive {
+            stopVMC()
+        }
     }
 
     func stopAllTrackingSync() {
         localMotionService.stopSync()
         localAudioFaceService.stopSync()
+        localArdyService.stopSync()
         vmcController.stop()
     }
 
