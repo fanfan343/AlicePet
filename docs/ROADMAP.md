@@ -20,8 +20,10 @@
 
 ## Stage 3：动作系统深化（分层混合器 + ARDY Mini）
 - [x] 定义统一的 `MotionSource` 协议，并实现原版 Unity Humanoid 肌肉动画提取器（`tools/extract_alice_animations.py`）与实时重定向播放器（`UnityMuscleRetargeter` + `AuthorAnimationPlayer`），还原作者原版 Stand / Sit / Crouch / Prone / 16.67s AFK 循环动作
-- [x] 实现三层动画混合器 `AnimationMixer`（独立 VMC 通道隔离 + Layer 0 全身 0.35s SLERP Crossfade 过渡 + Layer 1 语音头部微动四元数叠加 + Layer 2 52 通道面部与眨眼/视线解耦）
+- [x] 实现三层动画混合器 `AnimationMixer`（独立 VMC 通道隔离 + Layer 0 全身 0.35s SLERP Crossfade 过渡 + Layer 1 语音头部微动四元数叠加 + Layer 2 下脸口型 / 上脸情绪 / 视线与眨眼三轨解耦）
 - [x] 在「测试功能 (Lab)」中以独立本地子服务方式接入 **ARDY Mini**（`services/ardy/`，文本驱动 20fps 自回归全身动作）与通用双臂比例 2-Bone IK / 防穿模保护
+- [x] 接入 **NVIDIA Audio2Face-3D v2.3.1 Claire**（`services/tts/audio2face3d_vmc.py`，官方 ONNX + 52-D 缓存求解器，支持原生 10 维情绪与真实眉眼动态，并可在 Lab 面板与 LAM 切换对比）
+- [x] 实现轻量「画中世界（形态 B）」原生 Metal 渲染器（`PictureWorldRenderer` + `services/scene/` MoGe-2 单图深度与地平面重建，支持透明桌宠 ↔ 2D→3D 房间硬件深度遮挡一键切换）
 - [ ] 支持加载播放标准 `.vrma` 动画文件
 
 ## Stage 4：面捕与上半身捕捉进阶

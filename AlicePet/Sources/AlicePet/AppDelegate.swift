@@ -122,7 +122,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.controller.camera.orbit(deltaX: dx, deltaY: dy)
         }
         mtkView.onPanDrag = { [weak self] dx, dy in
-            self?.controller.camera.pan(deltaX: dx, deltaY: dy)
+            guard let self else { return }
+            if self.controller.isPictureWorldActive {
+                self.controller.movePictureWorldAvatar(deltaX: dx * 0.0045, deltaZ: dy * 0.0045)
+            } else {
+                self.controller.camera.pan(deltaX: dx, deltaY: dy)
+            }
         }
         mtkView.onZoom = { [weak self] dy in
             self?.controller.camera.zoom(deltaY: dy)
@@ -134,6 +139,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.buildMenu() ?? NSMenu()
         }
 
+        controller.onPictureWorldChanged = { [weak self] in
+            self?.syncWindowForPictureWorld()
+            self?.refreshMenus()
+        }
         controller.onVMCStatusChanged = { [weak self] in
             guard let self else { return }
             self.updateStatusBarTitle()
@@ -549,6 +558,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openItem.target = self
         menu.addItem(openItem)
 
+        // Picture-World (Mode B: Single-Image Metric Depth 3D Scene)
+        let sceneMenu = NSMenu()
+        let exitSceneItem = NSMenuItem(
+            title: "透明桌宠模式（形态 A · 0 场景显存）",
+            action: #selector(exitPictureWorldMode),
+            keyEquivalent: ""
+        )
+        exitSceneItem.target = self
+        exitSceneItem.state = controller.isPictureWorldActive ? .off : .on
+        sceneMenu.addItem(exitSceneItem)
+
+        let discoveredScenes = discoverPictureWorldScenes()
+        if !discoveredScenes.isEmpty {
+            sceneMenu.addItem(.separator())
+            for folder in discoveredScenes {
+                let item = NSMenuItem(
+                    title: "进入：\(folder.lastPathComponent)",
+                    action: #selector(selectPictureWorldScene(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = folder.path
+                item.state = (controller.pictureWorldRenderer.sceneFolderURL?.standardizedFileURL == folder.standardizedFileURL) ? .on : .off
+                sceneMenu.addItem(item)
+            }
+        }
+        sceneMenu.addItem(.separator())
+        let openSceneItem = NSMenuItem(title: "打开自定义画中世界目录…", action: #selector(pickPictureWorldScene), keyEquivalent: "")
+        openSceneItem.target = self
+        sceneMenu.addItem(openSceneItem)
+        if controller.isPictureWorldActive {
+            let hintItem = NSMenuItem(title: "提示：Shift + 拖拽可在房间地面移动 Alice", action: nil, keyEquivalent: "")
+            hintItem.isEnabled = false
+            sceneMenu.addItem(hintItem)
+        }
+        let sceneRootTitle = controller.isPictureWorldActive
+            ? "画中世界 (场景运行中 · \(controller.pictureWorldRenderer.config?.name ?? ""))"
+            : "画中世界 (形态 B · 2D→3D)"
+        let sceneRoot = NSMenuItem(title: sceneRootTitle, action: nil, keyEquivalent: "")
+        sceneRoot.submenu = sceneMenu
+        menu.addItem(sceneRoot)
+
         // Experimental / Lab Features Submenu (tests live here until promoted to main menu)
         let labMenu = NSMenu()
         let openArdyItem = NSMenuItem(
@@ -961,6 +1012,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 try? await controller.loadModel(from: url)
                 refreshMenus()
+            }
+        }
+    }
+
+    private func discoverPictureWorldScenes() -> [URL] {
+        let fm = FileManager.default
+        let candidates = [
+            Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("scenes", isDirectory: true),
+            URL(fileURLWithPath: "/Users/funnyliu/Downloads/VRM项目/scenes", isDirectory: true),
+        ]
+        var found: [URL] = []
+        var seen: Set<String> = []
+        for root in candidates {
+            guard let items = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey]) else { continue }
+            for dir in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                let json = dir.appendingPathComponent("scene.json")
+                if fm.fileExists(atPath: json.path), seen.insert(dir.standardizedFileURL.path).inserted {
+                    found.append(dir)
+                }
+            }
+        }
+        return found
+    }
+
+    private func syncWindowForPictureWorld() {
+        guard let window, let mtkView else { return }
+        if controller.isPictureWorldActive {
+            let targetSize = NSSize(width: 820, height: 480)
+            var frame = window.frame
+            frame.origin.x -= (targetSize.width - frame.size.width) * 0.5
+            frame.size = targetSize
+            window.setFrame(frame, display: true, animate: true)
+            window.hasShadow = true
+            mtkView.layer?.cornerRadius = 14
+            mtkView.layer?.masksToBounds = true
+        } else {
+            let targetSize = NSSize(width: 460, height: 680)
+            var frame = window.frame
+            frame.origin.x += (frame.size.width - targetSize.width) * 0.5
+            frame.size = targetSize
+            window.setFrame(frame, display: true, animate: true)
+            window.hasShadow = false
+            mtkView.layer?.cornerRadius = 0
+            mtkView.layer?.masksToBounds = false
+        }
+    }
+
+    @objc private func exitPictureWorldMode() {
+        controller.exitPictureWorld()
+    }
+
+    @objc private func selectPictureWorldScene(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        do {
+            try controller.loadPictureWorld(from: URL(fileURLWithPath: path))
+        } catch {
+            AppLogger.shared.error("PictureWorld", "Failed to load scene: \(error)")
+        }
+    }
+
+    @objc private func pickPictureWorldScene() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.prompt = "选择含 scene.json 的画中世界目录"
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try controller.loadPictureWorld(from: url)
+            } catch {
+                AppLogger.shared.error("PictureWorld", "Failed to load scene: \(error)")
             }
         }
     }

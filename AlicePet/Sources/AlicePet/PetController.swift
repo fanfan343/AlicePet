@@ -23,6 +23,7 @@ final class PetController: NSObject, MTKViewDelegate {
     let commandQueue: MTLCommandQueue
     let renderer: VRMRenderer
     let propRenderer: PropSceneRenderer
+    let pictureWorldRenderer: PictureWorldRenderer
     let recipeStore = AssetRecipeStore()
     let poseController = PoseController()
     let expressionMixer = ExpressionMixer()
@@ -79,6 +80,8 @@ final class PetController: NSObject, MTKViewDelegate {
     var localArdyActive: Bool { localArdyService.isRunning }
     var onVMCStatusChanged: (() -> Void)?
     var onVMCError: ((String) -> Void)?
+    var onPictureWorldChanged: (() -> Void)?
+    var isPictureWorldActive: Bool { pictureWorldRenderer.isActive }
 
     private var startTime: TimeInterval = CACurrentMediaTime()
     private var lastFrameTime: TimeInterval = CACurrentMediaTime()
@@ -103,6 +106,7 @@ final class PetController: NSObject, MTKViewDelegate {
         config.strict = .off
         self.renderer = VRMRenderer(device: device, config: config)
         self.propRenderer = try PropSceneRenderer(device: device, sampleCount: sampleCount)
+        self.pictureWorldRenderer = try PictureWorldRenderer(device: device, sampleCount: sampleCount)
 
         super.init()
 
@@ -229,6 +233,66 @@ final class PetController: NSObject, MTKViewDelegate {
         AppLogger.shared.info("Pose", "Switched poseMode=\(mode.rawValue), propMode=\(propRenderer.activePropMode.rawValue)")
     }
 
+    // MARK: - Picture-World (Mode B: Single-Image Metric Depth 3D Scene)
+
+    func loadPictureWorld(from folderURL: URL) throws {
+        try pictureWorldRenderer.loadScene(from: folderURL)
+        if let lightRaw = pictureWorldRenderer.config?.lightingPreset,
+           let preset = LightingPreset(rawValue: lightRaw) {
+            setLightingPreset(preset)
+        }
+        applyPictureWorldRootTransform()
+        settleSpringBonePhysics(warmupSteps: 16)
+        onPictureWorldChanged?()
+    }
+
+    func exitPictureWorld() {
+        guard pictureWorldRenderer.isActive else { return }
+        pictureWorldRenderer.unloadScene()
+        restoreRestRootTransform()
+        camera.reset()
+        settleSpringBonePhysics(warmupSteps: 12)
+        onPictureWorldChanged?()
+    }
+
+    func movePictureWorldAvatar(deltaX: Float, deltaZ: Float) {
+        guard pictureWorldRenderer.isActive else { return }
+        var p = pictureWorldRenderer.avatarWorldPosition
+        p.x += deltaX
+        p.z += deltaZ
+        if let minB = pictureWorldRenderer.config?.walkBoundsMin, minB.count == 2,
+           let maxB = pictureWorldRenderer.config?.walkBoundsMax, maxB.count == 2 {
+            p.x = min(max(p.x, minB[0]), maxB[0])
+            p.z = min(max(p.z, minB[1]), maxB[1])
+        }
+        pictureWorldRenderer.avatarWorldPosition = p
+        applyPictureWorldRootTransform()
+    }
+
+    func applyPictureWorldRootTransform() {
+        guard pictureWorldRenderer.isActive, let model else { return }
+        let offset = pictureWorldRenderer.avatarWorldPosition
+        let yawQ = simd_quatf(angle: pictureWorldRenderer.avatarWorldYaw, axis: SIMD3<Float>(0, 1, 0))
+        for (idx, node) in model.nodes.enumerated() where node.parent == nil {
+            guard let rest = poseController.restNodeTransforms[idx] else { continue }
+            node.translation = rest.pos + offset
+            node.rotation = simd_normalize(yawQ * rest.rot)
+            node.updateLocalMatrix()
+        }
+        model.updateNodeTransforms()
+    }
+
+    private func restoreRestRootTransform() {
+        guard let model else { return }
+        for (idx, node) in model.nodes.enumerated() where node.parent == nil {
+            guard let rest = poseController.restNodeTransforms[idx] else { continue }
+            node.translation = rest.pos
+            node.rotation = rest.rot
+            node.updateLocalMatrix()
+        }
+        model.updateNodeTransforms()
+    }
+
     func setHandGesture(_ preset: HandGesturePreset, side: HandSide = .both) {
         poseController.setHandGesture(preset, side: side)
         applyAllBodyAndOutfitState(settlePhysics: false)
@@ -342,7 +406,7 @@ final class PetController: NSObject, MTKViewDelegate {
     func startTimers() {
         expressionMixer.startAutoBlink(
             rendererProvider: { [weak self] in self?.renderer },
-            isCameraActive: { [weak self] in self?.animationMixer.isFaceCaptured ?? false }
+            isCameraActive: { [weak self] in self?.animationMixer.isEyeAndBlinkCaptured ?? false }
         )
     }
 
@@ -389,7 +453,7 @@ final class PetController: NSObject, MTKViewDelegate {
             guard animationMixer.audioFaceChannel.start(port: 0) else { return false }
         }
         guard let boundPort = animationMixer.audioFaceChannel.boundPort else { return false }
-        expressionMixer.prepareForTrackingStart(on: renderer)
+        // Preserve active mood/custom expressions (e.g. blush / starry eyes) so Alice can talk with emotion
         let ok = localAudioFaceService.start(audioURL: audioURL, port: boundPort, maxSeconds: maxSeconds)
         if !ok {
             animationMixer.audioFaceChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
@@ -465,8 +529,13 @@ final class PetController: NSObject, MTKViewDelegate {
         let aspect = (view.drawableSize.height > 0)
             ? Float(view.drawableSize.width / view.drawableSize.height)
             : Float(view.bounds.width / max(view.bounds.height, 1))
-        renderer.projectionMatrix = camera.projectionMatrix(aspect: aspect)
-        renderer.viewMatrix = camera.viewMatrix
+        if let pwMats = pictureWorldRenderer.cameraMatrices(viewportAspect: aspect) {
+            renderer.projectionMatrix = pwMats.projection
+            renderer.viewMatrix = pwMats.view
+        } else {
+            renderer.projectionMatrix = camera.projectionMatrix(aspect: aspect)
+            renderer.viewMatrix = camera.viewMatrix
+        }
 
         let dt = max(0.0, min(frameStart - lastFrameTime, 0.1))
         lastFrameTime = frameStart
@@ -484,6 +553,22 @@ final class PetController: NSObject, MTKViewDelegate {
                 poseMode: poseMode,
                 window: view.window
             )
+            if pictureWorldRenderer.isActive {
+                applyPictureWorldRootTransform()
+            }
+        }
+
+        if pictureWorldRenderer.isActive,
+           let colorTex = descriptor.colorAttachments[0].texture,
+           let depthTex = descriptor.depthAttachment.texture {
+            pictureWorldRenderer.encodePrepass(
+                commandBuffer: commandBuffer,
+                colorTexture: colorTex,
+                depthTexture: depthTex,
+                viewportAspect: aspect
+            )
+            descriptor.colorAttachments[0].loadAction = .load
+            descriptor.depthAttachment.loadAction = .load
         }
 
         let drawProps = propRenderer.hasActiveProps
@@ -567,6 +652,9 @@ final class PetController: NSObject, MTKViewDelegate {
         if applyBaseState {
             applyAllBodyAndOutfitState(settlePhysics: true, animTime: animTime)
         }
+        if pictureWorldRenderer.isActive {
+            applyPictureWorldRootTransform()
+        }
 
         let colorDesc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .bgra8Unorm,
@@ -591,22 +679,37 @@ final class PetController: NSObject, MTKViewDelegate {
             throw NSError(domain: "AlicePet", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate offscreen textures"])
         }
 
+        let aspect = Float(width) / Float(height)
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = colorTex
-        rpd.colorAttachments[0].loadAction = .clear
+        rpd.colorAttachments[0].loadAction = pictureWorldRenderer.isActive ? .load : .clear
         rpd.colorAttachments[0].storeAction = .store
         rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
 
         rpd.depthAttachment.texture = depthTex
-        rpd.depthAttachment.loadAction = .clear
+        rpd.depthAttachment.loadAction = pictureWorldRenderer.isActive ? .load : .clear
         rpd.depthAttachment.storeAction = propRenderer.hasActiveProps ? .store : .dontCare
         rpd.depthAttachment.clearDepth = 1.0
 
-        renderer.projectionMatrix = camera.projectionMatrix(aspect: Float(width) / Float(height))
-        renderer.viewMatrix = camera.viewMatrix
+        if let pwMats = pictureWorldRenderer.cameraMatrices(viewportAspect: aspect) {
+            renderer.projectionMatrix = pwMats.projection
+            renderer.viewMatrix = pwMats.view
+        } else {
+            renderer.projectionMatrix = camera.projectionMatrix(aspect: aspect)
+            renderer.viewMatrix = camera.viewMatrix
+        }
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             throw NSError(domain: "AlicePet", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create command buffer"])
+        }
+
+        if pictureWorldRenderer.isActive {
+            pictureWorldRenderer.encodePrepass(
+                commandBuffer: commandBuffer,
+                colorTexture: colorTex,
+                depthTexture: depthTex,
+                viewportAspect: aspect
+            )
         }
 
         renderer.drawOffscreenHeadless(

@@ -32,9 +32,10 @@ func resolveInitialModelURL(isHeadlessSnapshot: Bool) -> URL {
 let vmcLoopbackPath = parseArg("--test-vmc-loopback")
 let motionServiceTestPath = parseArg("--test-motion-service")
 let audioFaceTestPath = parseArg("--test-audio2face")
+let a2f3dTestPath = parseArg("--test-a2f3d")
 let ardyTestPath = parseArg("--test-ardy")
 let mixerTestPath = parseArg("--test-mixer")
-let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil) || (motionServiceTestPath != nil) || (audioFaceTestPath != nil) || (ardyTestPath != nil) || (mixerTestPath != nil)
+let isSnapshotMode = (parseArg("--snapshot") != nil) || (vmcLoopbackPath != nil) || (motionServiceTestPath != nil) || (audioFaceTestPath != nil) || (a2f3dTestPath != nil) || (ardyTestPath != nil) || (mixerTestPath != nil)
 let modelURL = resolveInitialModelURL(isHeadlessSnapshot: isSnapshotMode)
 
 func sendLoopbackUDP(_ data: Data, toPort port: UInt16) throws {
@@ -274,6 +275,80 @@ if let audioOutputPath = audioFaceTestPath {
     exit(exitCode)
 }
 
+if let a2fOutputPath = a2f3dTestPath {
+    var done = false
+    var exitCode: Int32 = 0
+    Task { @MainActor in
+        do {
+            let controller = try PetController(sampleCount: 1)
+            try await controller.loadModel(from: modelURL, synchronousPhysics: true)
+            controller.camera.apply(preset: .faceCloseUp)
+
+            guard controller.animationMixer.audioFaceChannel.start(port: 0),
+                  let boundPort = controller.animationMixer.audioFaceChannel.boundPort else {
+                throw NSError(domain: "AlicePet.A2F3D", code: 35, userInfo: [NSLocalizedDescriptionKey: "Failed to bind isolated audioFace port"])
+            }
+            controller.animationMixer.audioFaceChannel.driver.maxAge = 20.0
+            guard let serviceDir = LocalAudioFaceService.resolveServiceDirectory() else {
+                throw NSError(domain: "AlicePet.A2F3D", code: 36, userInfo: [NSLocalizedDescriptionKey: "services/tts directory not found"])
+            }
+            let emotion = parseArg("--emotion") ?? "joy"
+            let strength = parseArg("--emotion-strength") ?? "0.85"
+            let proc = Process()
+            proc.executableURL = serviceDir.appendingPathComponent(".venv/bin/python")
+            proc.currentDirectoryURL = serviceDir
+            proc.arguments = [
+                "audio2face3d_vmc.py", "--self-test",
+                "--emotion", emotion, "--emotion-strength", strength,
+                "--host", "127.0.0.1", "--port", String(boundPort),
+            ]
+            var env = ProcessInfo.processInfo.environment
+            env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+            proc.environment = env
+            proc.standardInput = FileHandle.nullDevice
+            try proc.run()
+
+            let deadline = Date().addingTimeInterval(30.0)
+            while (controller.animationMixer.audioFaceChannel.packetCount == 0 || proc.isRunning) && Date() < deadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0,
+                  controller.animationMixer.audioFaceChannel.packetCount > 0,
+                  let model = controller.model else {
+                throw NSError(domain: "AlicePet.A2F3D", code: 37, userInfo: [NSLocalizedDescriptionKey: "A2F-3D self-test failed (status=\(proc.terminationStatus), packets=\(controller.animationMixer.audioFaceChannel.packetCount))"])
+            }
+
+            controller.animationMixer.evaluate(
+                model: model,
+                renderer: controller.renderer,
+                poseController: controller.poseController,
+                recipeStore: controller.recipeStore,
+                expressionMixer: controller.expressionMixer,
+                elapsed: 0.5,
+                dt: 0.5,
+                idleBreathingEnabled: true,
+                poseMode: controller.poseMode,
+                window: nil
+            )
+            controller.settleSpringBonePhysics(warmupSteps: 16)
+            print("A2F-3D E2E OK: emo=\(emotion) lookAtEnabled=\(controller.renderer.lookAtController?.enabled ?? false) shapes=\(controller.animationMixer.audioFaceChannel.receivedBlendShapeCount)")
+
+            try await controller.renderSnapshot(to: URL(fileURLWithPath: a2fOutputPath), applyBaseState: false)
+            print("A2F-3D E2E snapshot saved to \(a2fOutputPath)")
+            controller.stopAllTrackingSync()
+        } catch {
+            fputs("A2F-3D E2E error: \(error)\n", stderr)
+            exitCode = 1
+        }
+        done = true
+    }
+    while !done {
+        RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+    }
+    exit(exitCode)
+}
+
 if let ardyOutputPath = ardyTestPath {
     var done = false
     var exitCode: Int32 = 0
@@ -497,7 +572,36 @@ if let snapshotPath = parseArg("--snapshot") {
                 }
             }
 
-            try await controller.renderSnapshot(to: URL(fileURLWithPath: snapshotPath))
+            if let sceneDir = parseArg("--scene") {
+                try controller.loadPictureWorld(from: URL(fileURLWithPath: sceneDir))
+                if let posRaw = parseArg("--avatar-pos") {
+                    let parts = posRaw.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                    if parts.count == 2 {
+                        controller.pictureWorldRenderer.avatarWorldPosition = SIMD3<Float>(parts[0], 0, parts[1])
+                    } else if parts.count == 3 {
+                        controller.pictureWorldRenderer.avatarWorldPosition = SIMD3<Float>(parts[0], parts[1], parts[2])
+                    }
+                }
+                if let yawDegStr = parseArg("--avatar-yaw"), let yawDeg = Float(yawDegStr) {
+                    controller.pictureWorldRenderer.avatarWorldYaw = yawDeg * .pi / 180.0
+                }
+            }
+
+            var snapW = 720
+            var snapH = 1024
+            if let sizeRaw = parseArg("--size") {
+                let parts = sizeRaw.lowercased().split(separator: "x").compactMap { Int($0) }
+                if parts.count == 2, parts[0] > 64, parts[1] > 64 {
+                    snapW = parts[0]
+                    snapH = parts[1]
+                }
+            } else if controller.isPictureWorldActive, let cfg = controller.pictureWorldRenderer.config {
+                let scale = min(1.0, 1280.0 / Double(max(cfg.imageWidth, cfg.imageHeight)))
+                snapW = max(320, Int((Double(cfg.imageWidth) * scale).rounded()))
+                snapH = max(240, Int((Double(cfg.imageHeight) * scale).rounded()))
+            }
+
+            try await controller.renderSnapshot(to: URL(fileURLWithPath: snapshotPath), width: snapW, height: snapH)
             print("Snapshot saved to \(snapshotPath)")
         } catch {
             fputs("Snapshot error: \(error)\n", stderr)
