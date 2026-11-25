@@ -82,9 +82,13 @@ final class PetController: NSObject, MTKViewDelegate {
     var onVMCError: ((String) -> Void)?
     var onPictureWorldChanged: (() -> Void)?
     var isPictureWorldActive: Bool { pictureWorldRenderer.isActive }
+    /// Live spatial & perceptual state snapshot exposed for future LLM / agentic tool calls.
+    private(set) var latestSceneState: AvatarSceneState?
+    var onSceneStateUpdated: ((AvatarSceneState) -> Void)?
 
     private var startTime: TimeInterval = CACurrentMediaTime()
     private var lastFrameTime: TimeInterval = CACurrentMediaTime()
+    private var lastSceneStateSampleTime: TimeInterval = 0
     private var outfitNodeMeshes: [String: (nodeIndex: Int, meshIndex: Int)] = [:]
 
     // Lightweight periodic performance baseline sampler
@@ -255,19 +259,114 @@ final class PetController: NSObject, MTKViewDelegate {
         onPictureWorldChanged?()
     }
 
-    func movePictureWorldAvatar(deltaX: Float, deltaZ: Float) {
+    func panPictureWorldCanvas(deltaX: Float, deltaY: Float) {
         guard pictureWorldRenderer.isActive else { return }
-        let candidate = SIMD3<Float>(
-            pictureWorldRenderer.avatarWorldPosition.x + deltaX,
-            0.0,
-            pictureWorldRenderer.avatarWorldPosition.z + deltaZ
-        )
-        let aspect: Float = {
-            guard let view = hostView, view.bounds.height > 0 else { return 16.0 / 9.0 }
-            return Float(view.bounds.width / view.bounds.height)
-        }()
-        pictureWorldRenderer.avatarWorldPosition = pictureWorldRenderer.clampAvatarPositionToSafeRoom(candidate, viewportAspect: aspect)
+        let size = hostView?.bounds.size ?? CGSize(width: 820, height: 480)
+        pictureWorldRenderer.panCanvas(deltaX: deltaX, deltaY: deltaY, viewportSize: size)
+    }
+
+    func zoomPictureWorldCanvas(deltaY: Float) {
+        guard pictureWorldRenderer.isActive else { return }
+        let aspect = currentViewportAspect()
+        pictureWorldRenderer.zoomCanvas(deltaY: deltaY, viewportAspect: aspect)
+    }
+
+    func resetPictureWorldViewAndAvatar() {
+        guard pictureWorldRenderer.isActive else { return }
+        pictureWorldRenderer.resetCanvasAndAvatarToOrigin()
         applyPictureWorldRootTransform()
+        settleSpringBonePhysics(warmupSteps: 8)
+        _ = refreshSceneState(aspect: currentViewportAspect(), force: true)
+    }
+
+    private func currentViewportAspect() -> Float {
+        guard let view = hostView, view.bounds.height > 0 else { return 820.0 / 480.0 }
+        return Float(view.bounds.width / view.bounds.height)
+    }
+
+    /// Builds an on-demand structured `AvatarSceneState` snapshot (location, depth occlusion,
+    /// boundary contact, active AI drivers) for future LLM / agentic tool integration.
+    func currentAvatarSceneState(aspect: Float? = nil) -> AvatarSceneState {
+        let resolvedAspect = aspect ?? currentViewportAspect()
+        let now = Date().timeIntervalSince1970
+        let activePrompt: String? = localArdyActive ? localArdyService.currentPrompt : nil
+
+        if pictureWorldRenderer.isActive {
+            let spatial = pictureWorldRenderer.evaluateSpatialSnapshot(viewportAspect: resolvedAspect)
+            let p = pictureWorldRenderer.avatarWorldPosition
+            return AvatarSceneState(
+                timestamp: now,
+                mode: "picture_world",
+                sceneName: pictureWorldRenderer.config?.name,
+                positionMeters: [p.x, p.y, p.z],
+                normalizedRoomPosition: spatial.normalizedRoomPosition,
+                facingYawDegrees: pictureWorldRenderer.avatarWorldYaw * 180.0 / .pi,
+                distanceToCameraMeters: spatial.distanceToCameraMeters,
+                screenNDC: spatial.screenNDC,
+                isOccluded: spatial.isOccluded,
+                occlusionRatio: spatial.occlusionRatio,
+                occludedRegions: spatial.occludedRegions,
+                boundaryContacts: spatial.boundaryContacts,
+                isNearBoundary: spatial.isNearBoundary,
+                activeBodyEngine: animationMixer.activeBodySource.rawValue,
+                activeFaceEngine: animationMixer.activeFaceSource.rawValue,
+                activeMotionPrompt: activePrompt,
+                canvasZoom: pictureWorldRenderer.canvasZoom
+            )
+        } else {
+            return AvatarSceneState(
+                timestamp: now,
+                mode: "desktop_pet",
+                sceneName: nil,
+                positionMeters: [0, 0, 0],
+                normalizedRoomPosition: [0, 0],
+                facingYawDegrees: camera.yaw * 180.0 / .pi,
+                distanceToCameraMeters: camera.distance,
+                screenNDC: [0, 0],
+                isOccluded: false,
+                occlusionRatio: 0,
+                occludedRegions: [],
+                boundaryContacts: [],
+                isNearBoundary: false,
+                activeBodyEngine: animationMixer.activeBodySource.rawValue,
+                activeFaceEngine: animationMixer.activeFaceSource.rawValue,
+                activeMotionPrompt: activePrompt,
+                canvasZoom: 1.0
+            )
+        }
+    }
+
+    func currentAvatarSceneStateJSON(pretty: Bool = false) -> String? {
+        currentAvatarSceneState().toJSONString(pretty: pretty)
+    }
+
+    @discardableResult
+    private func refreshSceneState(aspect: Float, force: Bool = false) -> AvatarSceneState? {
+        let now = CACurrentMediaTime()
+        if !force && (now - lastSceneStateSampleTime) < 0.20 {
+            return latestSceneState
+        }
+        lastSceneStateSampleTime = now
+        let prev = latestSceneState
+        let next = currentAvatarSceneState(aspect: aspect)
+        latestSceneState = next
+        if prev?.isOccluded != next.isOccluded || prev?.boundaryContacts != next.boundaryContacts {
+            AppLogger.shared.info(
+                "SceneState",
+                String(
+                    format: "mode=%@ pos=(%.2f,%.2f) occluded=%@(%.0f%%:%@) boundary=%@",
+                    next.mode,
+                    next.positionMeters[0],
+                    next.positionMeters[2],
+                    next.isOccluded ? "yes" : "no",
+                    next.occlusionRatio * 100.0,
+                    next.occludedRegions.joined(separator: ","),
+                    next.boundaryContacts.isEmpty ? "none" : next.boundaryContacts.joined(separator: ",")
+                )
+            )
+        }
+        onSceneStateUpdated?(next)
+        return next
     }
 
     func applyPictureWorldRootTransform() {
@@ -567,6 +666,7 @@ final class PetController: NSObject, MTKViewDelegate {
                 }
                 applyPictureWorldRootTransform()
             }
+            _ = refreshSceneState(aspect: aspect)
         }
 
         if pictureWorldRenderer.isActive,

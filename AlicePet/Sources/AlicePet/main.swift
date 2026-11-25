@@ -592,6 +592,42 @@ if let snapshotPath = parseArg("--snapshot") {
                 if let yawDegStr = parseArg("--avatar-yaw"), let yawDeg = Float(yawDegStr) {
                     controller.pictureWorldRenderer.avatarWorldYaw = yawDeg * .pi / 180.0
                 }
+                let snapAspect: Float = {
+                    if let cfg = controller.pictureWorldRenderer.config {
+                        return Float(cfg.imageWidth) / max(Float(cfg.imageHeight), 1.0)
+                    }
+                    return 820.0 / 480.0
+                }()
+                if let zoomStr = parseArg("--pw-zoom"), let z = Float(zoomStr), z > 1.0 {
+                    // Apply incremental zoom steps matching wheel interaction
+                    for _ in 0..<24 where controller.pictureWorldRenderer.canvasZoom < z {
+                        controller.pictureWorldRenderer.zoomCanvas(deltaY: 2.0, viewportAspect: snapAspect)
+                    }
+                }
+                if let panRaw = parseArg("--pw-pan") {
+                    let parts = panRaw.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                    if parts.count == 2 {
+                        controller.pictureWorldRenderer.panCanvas(deltaX: parts[0], deltaY: parts[1], viewportSize: CGSize(width: 1280, height: 848))
+                    }
+                }
+                if CommandLine.arguments.contains("--pw-test-wall-walk") {
+                    // Simulate ARDY walking persistently right (+X) for 80 steps (4.0m):
+                    // verifies smooth inward yaw turn-back so Alice never gets pinned on the right edge!
+                    controller.pictureWorldRenderer.resetARDYRootTracking()
+                    var rootX: Float = 0
+                    for step in 0...80 {
+                        rootX = Float(step) * 0.05
+                        controller.pictureWorldRenderer.applyARDYRootMotion(worldRootXZ: SIMD2<Float>(rootX, 0), viewportAspect: snapAspect)
+                        if step == 20 || step == 40 || step == 60 || step == 80 {
+                            let p = controller.pictureWorldRenderer.avatarWorldPosition
+                            let yawD = controller.pictureWorldRenderer.avatarWorldYaw * 180.0 / .pi
+                            print(String(format: "WallWalk step=%d pos=(%.2f,%.2f) yaw=%.1fdeg contacts=%@", step, p.x, p.z, yawD, controller.pictureWorldRenderer.lastBoundaryContacts.joined(separator: ",")))
+                        }
+                    }
+                }
+                if let json = controller.currentAvatarSceneState(aspect: snapAspect).toJSONString(pretty: false) {
+                    print("AvatarSceneState:", json)
+                }
             }
 
             var snapW = 720

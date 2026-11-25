@@ -14,14 +14,14 @@ final class ArdyLabPanel: NSObject, NSTextFieldDelegate {
     private let statusLabel = NSTextField(labelWithString: "状态：未启动 · 输入英文动作指令，ARDY 实时自回归续写")
 
     private let quickPrompts: [(title: String, prompt: String)] = [
-        ("站立放松", "a person stands relaxed and shifts weight gently"),
-        ("开心挥手", "a person stands and waves cheerfully with their right hand"),
-        ("双手招手", "a person waves happily with both hands raised high"),
-        ("优雅鞠躬", "a person bows politely forward and stands back up"),
-        ("开心转圈", "a person spins around happily in place"),
-        ("伸个懒腰", "a person stretches both arms up high and relaxes"),
-        ("拍手鼓掌", "a person claps hands enthusiastically"),
-        ("原地漫步", "a person walks casually forward and looks around"),
+        ("温和站姿", "a petite gentle young girl stands softly and shifts weight delicately"),
+        ("轻柔挥手", "a petite gentle young girl stands gracefully and waves softly with her right hand"),
+        ("开心招手", "a cheerful young anime girl waves gently with both hands"),
+        ("优雅鞠躬", "a polite young girl bows gracefully forward and rises softly"),
+        ("轻盈转圈", "a cute young girl twirls around lightly and gracefully in place"),
+        ("温柔伸腰", "a gentle young girl stretches both arms softly upward and relaxes"),
+        ("开心鼓掌", "a cheerful young girl claps her hands lightly in front of her chest"),
+        ("房间漫步", "a gentle young girl takes small light steps walking slowly and looking around curiously"),
     ]
 
     var onToggleStartStop: (() -> Void)?

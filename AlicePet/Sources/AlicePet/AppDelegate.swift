@@ -119,21 +119,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mtkView.delegate = controller
 
         mtkView.onOrbitDrag = { [weak self] dx, dy in
-            self?.controller.camera.orbit(deltaX: dx, deltaY: dy)
+            guard let self, !self.controller.isPictureWorldActive else { return }
+            self.controller.camera.orbit(deltaX: dx, deltaY: dy)
         }
         mtkView.onPanDrag = { [weak self] dx, dy in
             guard let self else { return }
             if self.controller.isPictureWorldActive {
-                self.controller.movePictureWorldAvatar(deltaX: dx * 0.0045, deltaZ: dy * 0.0045)
+                self.controller.panPictureWorldCanvas(deltaX: dx, deltaY: dy)
             } else {
                 self.controller.camera.pan(deltaX: dx, deltaY: dy)
             }
         }
         mtkView.onZoom = { [weak self] dy in
-            self?.controller.camera.zoom(deltaY: dy)
+            guard let self else { return }
+            if self.controller.isPictureWorldActive {
+                self.controller.zoomPictureWorldCanvas(deltaY: dy)
+            } else {
+                self.controller.camera.zoom(deltaY: dy)
+            }
         }
         mtkView.onDoubleClick = { [weak self] in
-            self?.controller.camera.reset()
+            guard let self else { return }
+            if self.controller.isPictureWorldActive {
+                self.controller.resetPictureWorldViewAndAvatar()
+            } else {
+                self.controller.camera.reset()
+            }
         }
         mtkView.contextMenuProvider = { [weak self] in
             self?.buildMenu() ?? NSMenu()
@@ -589,7 +600,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openSceneItem.target = self
         sceneMenu.addItem(openSceneItem)
         if controller.isPictureWorldActive {
-            let hintItem = NSMenuItem(title: "提示：Shift + 拖拽可在房间地面移动 Alice", action: nil, keyEquivalent: "")
+            let hintItem = NSMenuItem(title: "提示：滚轮缩放、中键平移画布，双击回到原点", action: nil, keyEquivalent: "")
             hintItem.isEnabled = false
             sceneMenu.addItem(hintItem)
         }
@@ -998,7 +1009,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func resetCamera() {
-        controller.camera.reset()
+        if controller.isPictureWorldActive {
+            controller.resetPictureWorldViewAndAvatar()
+        } else {
+            controller.camera.reset()
+        }
     }
 
     @objc private func openModelPanel() {

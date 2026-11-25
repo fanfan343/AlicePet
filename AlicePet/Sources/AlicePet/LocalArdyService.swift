@@ -5,8 +5,8 @@ import Foundation
 /// (ARDY Mini distilled MiniLM + Core40 ONNX -> 60 FPS SLERP VMC/OSC motion stream).
 @MainActor
 final class LocalArdyService {
-    var currentPrompt: String = "a person stands relaxed and waves cheerfully with their right hand"
-    var cfgWeight: Double = 2.5
+    var currentPrompt: String = "a petite gentle young girl stands gracefully and waves softly with her right hand"
+    var cfgWeight: Double = 2.2
 
     private(set) var isRunning: Bool = false
     private(set) var lastStatusLine: String = "未启动"

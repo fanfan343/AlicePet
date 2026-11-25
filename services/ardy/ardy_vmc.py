@@ -69,6 +69,28 @@ CSKEL27_TO_VMC_BINDINGS: list[tuple[str, str, str | None]] = [
 
 CORE27_REST_HIPS_HEIGHT = 0.9544128252334833
 
+# Positive, concrete HumanML3D-friendly motion-style cues that pull ARDY's MiniLM embedding
+# toward gentle, graceful, compact anime-girl movements rather than wide/heavy realistic mocap.
+ANIME_GIRL_STYLE_SUFFIX = "gently and gracefully with light, soft, modest movements and a relaxed feminine posture"
+
+
+def stylize_prompt_for_anime_girl(raw_prompt: str, enabled: bool = True) -> str:
+    text = raw_prompt.strip()
+    if not text or not enabled:
+        return text
+    lower = text.lower()
+    # Replace generic "a person" subject with a gentle young girl subject so ARDY adopts compact stride/posture
+    for prefix in ("a person ", "person ", "someone ", "a human "):
+        if lower.startswith(prefix):
+            text = "a petite gentle young girl " + text[len(prefix) :]
+            lower = text.lower()
+            break
+    if not any(k in lower for k in ("girl", "woman", "lady", "she ")):
+        text = f"a petite gentle young girl {text}"
+    if "gracefully" not in lower and "gently" not in lower and "softly" not in lower:
+        text = f"{text.rstrip('. ')}, {ANIME_GIRL_STYLE_SUFFIX}"
+    return text
+
 
 # MARK: - Quaternion Math (xyzw, right-handed VRM 1.0)
 
@@ -162,8 +184,9 @@ def vrm_to_unity_quat(q: np.ndarray) -> tuple[float, float, float, float]:
 class ArdyMiniEngine:
     """Pure ONNX Runtime implementation of ARDY Mini Core40 autoregressive streaming."""
 
-    def __init__(self, models_dir: Path, intra_threads: int = 4) -> None:
+    def __init__(self, models_dir: Path, intra_threads: int = 4, anime_girl_style: bool = True) -> None:
         self.models_dir = models_dir
+        self.anime_girl_style = anime_girl_style
         manifest_path = models_dir / "model.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Missing ARDY Mini manifest: {manifest_path}")
@@ -221,7 +244,8 @@ class ArdyMiniEngine:
         self.frame_count = 0
 
     def encode_prompt(self, prompt: str) -> tuple[np.ndarray, float]:
-        key = prompt.strip()
+        styled = stylize_prompt_for_anime_girl(prompt, enabled=self.anime_girl_style)
+        key = styled
         if key in self.prompt_cache:
             return self.prompt_cache[key], 0.0
         t0 = time.monotonic()
@@ -496,8 +520,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="ARDY Mini real-time streaming text-to-motion VMC engine")
     default_dir = Path(__file__).resolve().parent / "models"
     parser.add_argument("--models-dir", default=str(default_dir))
-    parser.add_argument("--prompt", default="a person stands relaxed and waves cheerfully with their right hand")
-    parser.add_argument("--cfg", type=float, default=2.5)
+    parser.add_argument("--prompt", default="a petite gentle young girl stands gracefully and waves softly with her right hand")
+    parser.add_argument("--cfg", type=float, default=2.2)
+    parser.add_argument("--style-mode", choices=["anime_girl", "raw"], default="anime_girl")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=39539)
@@ -510,7 +535,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     models_dir = Path(args.models_dir)
-    engine = ArdyMiniEngine(models_dir=models_dir, intra_threads=args.threads)
+    engine = ArdyMiniEngine(models_dir=models_dir, intra_threads=args.threads, anime_girl_style=(args.style_mode == "anime_girl"))
     engine.reset(seed=args.seed)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
