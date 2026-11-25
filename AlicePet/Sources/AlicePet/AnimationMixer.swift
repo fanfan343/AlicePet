@@ -136,12 +136,12 @@ final class AnimationMixer {
             )
         case .externalVMC:
             poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
-            poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
             _ = externalChannel.applyBonesOnly(to: model)
+            poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
         case .ardy:
             poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
-            poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore)
             _ = ardyChannel.applyBonesOnly(to: model)
+            poseController.applyHandGestureOverrides(to: model, recipeStore: recipeStore, applyRelaxedNatural: true)
         }
 
         // Smoothstep SLERP crossfade between previous Layer 0 pose and incoming Layer 0 pose

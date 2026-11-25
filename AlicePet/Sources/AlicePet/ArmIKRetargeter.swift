@@ -88,10 +88,17 @@ enum ArmIKRetargeter {
         let torsoUp = safeNormalize(neckPos - hipsPos, fallback: SIMD3<Float>(0, 1, 0))
         let torsoFwd = safeNormalize(simd_cross(tgtLeftAxis, torsoUp), fallback: SIMD3<Float>(0, 0, 1))
 
-        // Dynamic body collision primitives scaled proportionally to the loaded VRM's shoulder width
+        // Dynamic body & flared-skirt collision primitives scaled proportionally to the loaded VRM
         let torsoCapsuleStart = hipsPos + torsoUp * (tgtHalfShoulder * 0.35)
         let torsoCapsuleEnd = neckPos - torsoUp * (tgtHalfShoulder * 0.15)
         let torsoRadius = max(0.075, tgtHalfShoulder * 0.88)
+
+        // Tapered hip/skirt clearance cone below waist so resting & swinging hands glide cleanly
+        // outside flared anime dresses instead of burying into or snagging the skirt
+        let skirtConeTop = hipsPos + torsoUp * 0.02
+        let skirtConeBottom = hipsPos - torsoUp * max(0.32, (tgtL1 + tgtL2) * 0.85)
+        let skirtTopRadius = torsoRadius * 1.12
+        let skirtBottomRadius = max(0.18, torsoRadius * 2.15)
 
         let headRadius = max(0.105, tgtHalfShoulder * 1.15)
         let headCenter = headPos + torsoUp * (headRadius * 0.72)
@@ -126,7 +133,7 @@ enum ArmIKRetargeter {
             armScale: rightArmScale
         )
 
-        // Push hand targets outside torso capsule & head sphere to prevent chest/face clipping
+        // Push hand targets outside torso capsule, flared skirt cone, & head sphere
         let handClearance: Float = 0.032
         let (lh1, lhClip1) = pushOutOfCapsule(
             point: targetLH,
@@ -135,8 +142,16 @@ enum ArmIKRetargeter {
             radius: torsoRadius + handClearance,
             preferredOutward: safeNormalize(tgtLeftAxis * 0.35 + torsoFwd * 0.94, fallback: torsoFwd)
         )
-        let (lh2, lhClip2) = pushOutOfSphere(
+        let (lh1b, lhClipSkirt) = pushOutOfTaperedCone(
             point: lh1,
+            top: skirtConeTop,
+            bottom: skirtConeBottom,
+            topRadius: skirtTopRadius + handClearance,
+            bottomRadius: skirtBottomRadius + handClearance,
+            preferredOutward: safeNormalize(tgtLeftAxis * 0.85 + torsoFwd * 0.52, fallback: tgtLeftAxis)
+        )
+        let (lh2, lhClip2) = pushOutOfSphere(
+            point: lh1b,
             center: headCenter,
             radius: headRadius + handClearance,
             preferredOutward: safeNormalize(tgtLeftAxis * 0.5 + torsoFwd * 0.86, fallback: torsoFwd)
@@ -150,8 +165,16 @@ enum ArmIKRetargeter {
             radius: torsoRadius + handClearance,
             preferredOutward: safeNormalize(-tgtLeftAxis * 0.35 + torsoFwd * 0.94, fallback: torsoFwd)
         )
-        let (rh2, rhClip2) = pushOutOfSphere(
+        let (rh1b, rhClipSkirt) = pushOutOfTaperedCone(
             point: rh1,
+            top: skirtConeTop,
+            bottom: skirtConeBottom,
+            topRadius: skirtTopRadius + handClearance,
+            bottomRadius: skirtBottomRadius + handClearance,
+            preferredOutward: safeNormalize(-tgtLeftAxis * 0.85 + torsoFwd * 0.52, fallback: -tgtLeftAxis)
+        )
+        let (rh2, rhClip2) = pushOutOfSphere(
+            point: rh1b,
             center: headCenter,
             radius: headRadius + handClearance,
             preferredOutward: safeNormalize(-tgtLeftAxis * 0.5 + torsoFwd * 0.86, fallback: torsoFwd)
@@ -188,7 +211,7 @@ enum ArmIKRetargeter {
             tgtLeftAxis: tgtLeftAxis,
             torsoUp: torsoUp,
             torsoFwd: torsoFwd,
-            hadTargetClip: lhClip1 || lhClip2 || handsSeparated
+            hadTargetClip: lhClip1 || lhClipSkirt || lhClip2 || handsSeparated
         )
         let rightDiag = solveArmChain(
             side: "Right",
@@ -206,7 +229,7 @@ enum ArmIKRetargeter {
             tgtLeftAxis: tgtLeftAxis,
             torsoUp: torsoUp,
             torsoFwd: torsoFwd,
-            hadTargetClip: rhClip1 || rhClip2 || handsSeparated
+            hadTargetClip: rhClip1 || rhClipSkirt || rhClip2 || handsSeparated
         )
 
         updateRootWorldTransforms(of: model)
@@ -348,18 +371,97 @@ enum ArmIKRetargeter {
         lowerNode.updateLocalMatrix()
         lowerNode.updateWorldTransform()
 
-        // 3. Softly preserve FK wrist world orientation so palms remain aligned for waves and claps
+        // 3. Anatomical Forearm-Twist Split + Wrist Joint Limits (eliminates candy-wrapper wrist pinching
+        //    and extreme 60-80° side-bends from 1-DOF elbow mocap skeletons like ARDY Core27)
+        let identityQ = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
         let handParentRot = worldRotation(of: handNode.parent)
-        var desiredHandLocal = simd_normalize(handParentRot.inverse * fkHandWorldRot)
-        if simd_dot(handNode.rotation, desiredHandLocal) < 0 {
-            desiredHandLocal = -desiredHandLocal
+        var rawHandLocal = simd_normalize(handParentRot.inverse * fkHandWorldRot)
+        if rawHandLocal.real < 0 { rawHandLocal = -rawHandLocal }
+
+        // Self-calibrating longitudinal forearm axis in bone-local coordinates (works for VRM 0.x & 1.0)
+        let localArmAxis = safeNormalize(handNode.translation, fallback: SIMD3<Float>(isLeft ? -1 : 1, 0, 0))
+        let (rawSwing, rawTwistAngle) = decomposeSwingTwist(rawHandLocal, axis: localArmAxis)
+
+        // Transfer 55% of pronation/supination roll onto the forearm bone, keeping 45% gently on the wrist
+        let clampedTotalTwist = min(max(rawTwistAngle, -1.15), 1.15) // ±66° total forearm+wrist roll
+        let forearmTwistAngle = clampedTotalTwist * 0.55
+        let wristTwistAngle = min(max(clampedTotalTwist * 0.45, -0.40), 0.40) // ±23° max wrist roll
+
+        if abs(forearmTwistAngle) > 0.005 {
+            let qForearmTwist = simd_quatf(angle: forearmTwistAngle, axis: localArmAxis)
+            lowerNode.rotation = simd_normalize(lowerNode.rotation * qForearmTwist)
+            lowerNode.updateLocalMatrix()
+            lowerNode.updateWorldTransform()
         }
-        handNode.rotation = simd_normalize(simd_slerp(handNode.rotation, desiredHandLocal, 0.75))
+
+        // Softly damp and clamp wrist flexion/deviation swing so wrists stay graceful (<= 24°)
+        let dampedSwing = clampQuaternionAngle(
+            simd_slerp(identityQ, rawSwing, 0.58),
+            maxAngleRad: 24.0 * .pi / 180.0
+        )
+        let qWristTwist = simd_quatf(angle: wristTwistAngle, axis: localArmAxis)
+        handNode.rotation = simd_normalize(dampedSwing * qWristTwist)
         handNode.updateLocalMatrix()
         handNode.updateWorldTransform()
 
         let shiftCm = simd_length(pTarget - pHFk) * 100.0
         return ArmDiagnostics(side: side, targetShiftCm: shiftCm, clippedAdjusted: hadTargetClip || elbowClipped)
+    }
+
+    /// Decomposes a unit quaternion `q` into `swing * twist` where `twist` is a pure rotation
+    /// around `axis` (unit vector) and returns `(swing, signedTwistAngleRadians)`.
+    private static func decomposeSwingTwist(_ qIn: simd_quatf, axis: SIMD3<Float>) -> (swing: simd_quatf, twistAngle: Float) {
+        var q = simd_normalize(qIn)
+        if q.real < 0 { q = -q }
+        let proj = simd_dot(q.imag, axis) * axis
+        let twistLenSq = simd_length_squared(proj) + q.real * q.real
+        let twist: simd_quatf
+        if twistLenSq > 1e-8 {
+            let invLen = 1.0 / sqrt(twistLenSq)
+            twist = simd_quatf(ix: proj.x * invLen, iy: proj.y * invLen, iz: proj.z * invLen, r: q.real * invLen)
+        } else {
+            twist = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+        }
+        let swing = simd_normalize(q * twist.inverse)
+        let sinHalf = simd_dot(twist.imag, axis)
+        let twistAngle = 2.0 * atan2(sinHalf, twist.real)
+        return (swing, twistAngle)
+    }
+
+    private static func clampQuaternionAngle(_ qIn: simd_quatf, maxAngleRad: Float) -> simd_quatf {
+        var q = simd_normalize(qIn)
+        if q.real < 0 { q = -q }
+        let halfAngle = acos(min(max(q.real, -1.0), 1.0))
+        let angle = 2.0 * halfAngle
+        guard angle > maxAngleRad, angle > 1e-5 else { return q }
+        let sinHalf = sin(halfAngle)
+        guard sinHalf > 1e-5 else { return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) }
+        let axis = q.imag / sinHalf
+        return simd_quatf(angle: maxAngleRad, axis: axis)
+    }
+
+    private static func pushOutOfTaperedCone(
+        point: SIMD3<Float>,
+        top: SIMD3<Float>,
+        bottom: SIMD3<Float>,
+        topRadius: Float,
+        bottomRadius: Float,
+        preferredOutward: SIMD3<Float>
+    ) -> (SIMD3<Float>, Bool) {
+        let ab = bottom - top
+        let abLenSq = simd_length_squared(ab)
+        guard abLenSq > 1e-6 else { return (point, false) }
+        let rawT = simd_dot(point - top, ab) / abLenSq
+        // Only apply skirt clearance when the hand is actually in the vertical waist-to-hem band
+        guard rawT >= -0.05 && rawT <= 1.08 else { return (point, false) }
+        let t = min(max(rawT, 0.0), 1.0)
+        let axisPt = top + ab * t
+        let radiusAtT = topRadius + (bottomRadius - topRadius) * t
+        let radial = point - axisPt
+        let dist = simd_length(radial)
+        guard dist < radiusAtT else { return (point, false) }
+        let outDir = (dist > 1e-4) ? (radial / dist) : preferredOutward
+        return (axisPt + outDir * radiusAtT, true)
     }
 
     private static func solveElbowPosition(

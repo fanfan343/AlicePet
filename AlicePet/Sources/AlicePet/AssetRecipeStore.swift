@@ -391,4 +391,51 @@ final class AssetRecipeStore {
 
         return out
     }
+
+    /// Gentle, relaxed anime resting finger curl for body-only motion engines (like ARDY)
+    /// that do not drive individual finger joints, replacing stiff flat T-pose paddle hands.
+    static func relaxedNaturalFingerRotations(isLeft: Bool) -> [VRMHumanoidBone: simd_quatf] {
+        var out: [VRMHumanoidBone: simd_quatf] = [:]
+        let curlSign: Float = isLeft ? -1.0 : 1.0
+        let spreadSign: Float = isLeft ? -1.0 : 1.0
+        let deg2rad: Float = .pi / 180.0
+
+        // Progressive delicate anime curl: index softest, pinky slightly more curled
+        let specs: [(bones: [VRMHumanoidBone], curlsDeg: [Float], spreadDeg: Float)] = [
+            (isLeft ? [.leftIndexProximal, .leftIndexIntermediate, .leftIndexDistal]
+                    : [.rightIndexProximal, .rightIndexIntermediate, .rightIndexDistal],
+             [12, 16, 10], -3.0),
+            (isLeft ? [.leftMiddleProximal, .leftMiddleIntermediate, .leftMiddleDistal]
+                    : [.rightMiddleProximal, .rightMiddleIntermediate, .rightMiddleDistal],
+             [16, 20, 12], 0.0),
+            (isLeft ? [.leftRingProximal, .leftRingIntermediate, .leftRingDistal]
+                    : [.rightRingProximal, .rightRingIntermediate, .rightRingDistal],
+             [20, 24, 14], 2.5),
+            (isLeft ? [.leftLittleProximal, .leftLittleIntermediate, .leftLittleDistal]
+                    : [.rightLittleProximal, .rightLittleIntermediate, .rightLittleDistal],
+             [24, 28, 16], 5.0),
+        ]
+
+        for spec in specs {
+            for (segIdx, bone) in spec.bones.enumerated() {
+                let qCurl = simd_quatf(angle: spec.curlsDeg[segIdx] * deg2rad * curlSign, axis: SIMD3<Float>(0, 0, 1))
+                if segIdx == 0 && abs(spec.spreadDeg) > 0.01 {
+                    let qSpread = simd_quatf(angle: spec.spreadDeg * deg2rad * spreadSign, axis: SIMD3<Float>(0, 1, 0))
+                    out[bone] = qSpread * qCurl
+                } else {
+                    out[bone] = qCurl
+                }
+            }
+        }
+
+        let thumbBones: [VRMHumanoidBone] = isLeft
+            ? [.leftThumbMetacarpal, .leftThumbProximal, .leftThumbDistal]
+            : [.rightThumbMetacarpal, .rightThumbProximal, .rightThumbDistal]
+        out[thumbBones[0]] =
+            simd_quatf(angle: (isLeft ? 1 : -1) * 14.0 * deg2rad, axis: SIMD3<Float>(0, 1, 0)) *
+            simd_quatf(angle: (isLeft ? -1 : 1) * 8.0 * deg2rad, axis: SIMD3<Float>(0, 0, 1))
+        out[thumbBones[1]] = simd_quatf(angle: (isLeft ? 1 : -1) * 10.0 * deg2rad, axis: SIMD3<Float>(0, 1, 0))
+        out[thumbBones[2]] = simd_quatf(angle: (isLeft ? 1 : -1) * 12.0 * deg2rad, axis: SIMD3<Float>(0, 1, 0))
+        return out
+    }
 }

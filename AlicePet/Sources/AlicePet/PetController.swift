@@ -184,6 +184,23 @@ final class PetController: NSObject, MTKViewDelegate {
         let (minBounds, maxBounds) = loaded.calculateBoundingBox()
         camera.fit(minBounds: minBounds, maxBounds: maxBounds)
 
+        // Filter out VRMMetalKit's synthetic 14cm hand palm spheres & forearm capsules so hand
+        // movements near hips never hook underneath and flip flared skirts upward, while keeping
+        // all authored colliders + synthetic leg/head/torso/shoulder/breast colliders intact.
+        if var sb = loaded.springBone, let humanoid = loaded.humanoid, !sb.syntheticColliders.isEmpty {
+            let excludedArmNodes = Set(
+                [VRMHumanoidBone.leftHand, .rightHand, .leftLowerArm, .rightLowerArm]
+                    .compactMap { humanoid.getBoneNode($0) }
+            )
+            let beforeCount = sb.syntheticColliders.count
+            sb.syntheticColliders.removeAll { excludedArmNodes.contains($0.node) }
+            loaded.springBone = sb
+            let removed = beforeCount - sb.syntheticColliders.count
+            if removed > 0 {
+                AppLogger.shared.info("Physics", "Filtered \(removed) synthetic hand/forearm SpringBone collider(s) to prevent skirt lifting (kept \(sb.syntheticColliders.count) leg/body/head colliders)")
+            }
+        }
+
         renderer.loadModel(loaded)
         applyLightingAndOutline()
         expressionMixer.initializeForModel(loaded, renderer: renderer)

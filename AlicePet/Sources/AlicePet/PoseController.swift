@@ -220,33 +220,43 @@ final class PoseController: MotionSource {
 
     // MARK: - Hand Overrides & Hair
 
-    func applyHandGestureOverrides(to model: VRMModel, recipeStore: AssetRecipeStore) {
-        if leftHandGesture != .natural {
-            let leftFingers: [VRMHumanoidBone] = [
-                .leftThumbMetacarpal, .leftThumbProximal, .leftThumbDistal,
-                .leftIndexProximal, .leftIndexIntermediate, .leftIndexDistal,
-                .leftMiddleProximal, .leftMiddleIntermediate, .leftMiddleDistal,
-                .leftRingProximal, .leftRingIntermediate, .leftRingDistal,
-                .leftLittleProximal, .leftLittleIntermediate, .leftLittleDistal,
-            ]
+    func applyHandGestureOverrides(
+        to model: VRMModel,
+        recipeStore: AssetRecipeStore,
+        applyRelaxedNatural: Bool = false
+    ) {
+        let leftFingers: [VRMHumanoidBone] = [
+            .leftThumbMetacarpal, .leftThumbProximal, .leftThumbDistal,
+            .leftIndexProximal, .leftIndexIntermediate, .leftIndexDistal,
+            .leftMiddleProximal, .leftMiddleIntermediate, .leftMiddleDistal,
+            .leftRingProximal, .leftRingIntermediate, .leftRingDistal,
+            .leftLittleProximal, .leftLittleIntermediate, .leftLittleDistal,
+        ]
+        if leftHandGesture != .natural || applyRelaxedNatural {
             resetHumanoidBones(leftFingers, on: model, restTransforms: restNodeTransforms)
-            for (bone, q) in recipeStore.fingerRotations(for: leftHandGesture, isLeft: true) {
+            let rots = (leftHandGesture != .natural)
+                ? recipeStore.fingerRotations(for: leftHandGesture, isLeft: true)
+                : AssetRecipeStore.relaxedNaturalFingerRotations(isLeft: true)
+            for (bone, q) in rots {
                 if let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restNodeTransforms[idx] {
                     model.nodes[idx].rotation = rest.rot * q
                     model.nodes[idx].updateLocalMatrix()
                 }
             }
         }
-        if rightHandGesture != .natural {
-            let rightFingers: [VRMHumanoidBone] = [
-                .rightThumbMetacarpal, .rightThumbProximal, .rightThumbDistal,
-                .rightIndexProximal, .rightIndexIntermediate, .rightIndexDistal,
-                .rightMiddleProximal, .rightMiddleIntermediate, .rightMiddleDistal,
-                .rightRingProximal, .rightRingIntermediate, .rightRingDistal,
-                .rightLittleProximal, .rightLittleIntermediate, .rightLittleDistal,
-            ]
+        let rightFingers: [VRMHumanoidBone] = [
+            .rightThumbMetacarpal, .rightThumbProximal, .rightThumbDistal,
+            .rightIndexProximal, .rightIndexIntermediate, .rightIndexDistal,
+            .rightMiddleProximal, .rightMiddleIntermediate, .rightMiddleDistal,
+            .rightRingProximal, .rightRingIntermediate, .rightRingDistal,
+            .rightLittleProximal, .rightLittleIntermediate, .rightLittleDistal,
+        ]
+        if rightHandGesture != .natural || applyRelaxedNatural {
             resetHumanoidBones(rightFingers, on: model, restTransforms: restNodeTransforms)
-            for (bone, q) in recipeStore.fingerRotations(for: rightHandGesture, isLeft: false) {
+            let rots = (rightHandGesture != .natural)
+                ? recipeStore.fingerRotations(for: rightHandGesture, isLeft: false)
+                : AssetRecipeStore.relaxedNaturalFingerRotations(isLeft: false)
+            for (bone, q) in rots {
                 if let idx = model.humanoid?.getBoneNode(bone), idx < model.nodes.count, let rest = restNodeTransforms[idx] {
                     model.nodes[idx].rotation = rest.rot * q
                     model.nodes[idx].updateLocalMatrix()

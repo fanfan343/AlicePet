@@ -199,7 +199,9 @@ if let motionOutputPath = motionServiceTestPath {
                 renderer: controller.renderer,
                 expressionMixer: controller.expressionMixer
             )
-            controller.settleSpringBonePhysics(warmupSteps: 16)
+            controller.poseController.applyHandGestureOverrides(to: model, recipeStore: controller.recipeStore, applyRelaxedNatural: true)
+            model.updateNodeTransforms()
+            controller.settleSpringBonePhysics(warmupSteps: 24)
             print("MotionService E2E OK: port=\(boundPort) packets=\(controller.vmcController.packetCount) bones=\(controller.vmcController.receivedBoneCount) blendShapes=\(controller.vmcController.receivedBlendShapeCount) applied=\(applied)")
 
             try await controller.renderSnapshot(to: URL(fileURLWithPath: motionOutputPath), applyBaseState: false)
@@ -257,7 +259,9 @@ if let audioOutputPath = audioFaceTestPath {
                 renderer: controller.renderer,
                 expressionMixer: controller.expressionMixer
             )
-            controller.settleSpringBonePhysics(warmupSteps: 16)
+            controller.poseController.applyHandGestureOverrides(to: model, recipeStore: controller.recipeStore, applyRelaxedNatural: true)
+            model.updateNodeTransforms()
+            controller.settleSpringBonePhysics(warmupSteps: 24)
             print("Audio2Face E2E OK: port=\(boundPort) packets=\(controller.vmcController.packetCount) bones=\(controller.vmcController.receivedBoneCount) blendShapes=\(controller.vmcController.receivedBlendShapeCount) applied=\(applied)")
 
             try await controller.renderSnapshot(to: URL(fileURLWithPath: audioOutputPath), applyBaseState: false)
@@ -394,7 +398,9 @@ if let ardyOutputPath = ardyTestPath {
                 renderer: controller.renderer,
                 expressionMixer: controller.expressionMixer
             )
-            controller.settleSpringBonePhysics(warmupSteps: 16)
+            controller.poseController.applyHandGestureOverrides(to: model, recipeStore: controller.recipeStore, applyRelaxedNatural: true)
+            model.updateNodeTransforms()
+            controller.settleSpringBonePhysics(warmupSteps: 24)
             let ikSummary = controller.vmcController.lastArmIKDiagnostics
                 .map { "\($0.side):shift=\(String(format: "%.1f", $0.targetShiftCm))cm,clip=\($0.clippedAdjusted)" }
                 .joined(separator: ",")
