@@ -319,6 +319,10 @@ if let a2fOutputPath = a2f3dTestPath {
                 throw NSError(domain: "AlicePet.A2F3D", code: 37, userInfo: [NSLocalizedDescriptionKey: "A2F-3D self-test failed (status=\(proc.terminationStatus), packets=\(controller.animationMixer.audioFaceChannel.packetCount))"])
             }
 
+            let forcedBlink = Float(parseArg("--blink") ?? "0") ?? 0
+            if forcedBlink > 0 {
+                controller.renderer.expressionController?.setExpressionWeight(.blink, weight: forcedBlink)
+            }
             controller.animationMixer.evaluate(
                 model: model,
                 renderer: controller.renderer,
@@ -332,7 +336,10 @@ if let a2fOutputPath = a2f3dTestPath {
                 window: nil
             )
             controller.settleSpringBonePhysics(warmupSteps: 16)
-            print("A2F-3D E2E OK: emo=\(emotion) lookAtEnabled=\(controller.renderer.lookAtController?.enabled ?? false) shapes=\(controller.animationMixer.audioFaceChannel.receivedBlendShapeCount)")
+            let bodyMorphs = model.meshes.first?.primitives.first?.morphTargets.count ?? 0
+            let weights = controller.renderer.expressionController?.weightsForMesh(0, morphCount: bodyMorphs) ?? []
+            let activeNonZero = weights.filter { abs($0) > 0.001 }.count
+            print("A2F-3D E2E OK: emo=\(emotion) blink=\(forcedBlink) maxActiveMorphs=\(VRMMorphTargetSystem.maxActiveMorphs) activeBodyMorphs=\(activeNonZero) lookAtEnabled=\(controller.renderer.lookAtController?.enabled ?? false) shapes=\(controller.animationMixer.audioFaceChannel.receivedBlendShapeCount)")
 
             try await controller.renderSnapshot(to: URL(fileURLWithPath: a2fOutputPath), applyBaseState: false)
             print("A2F-3D E2E snapshot saved to \(a2fOutputPath)")

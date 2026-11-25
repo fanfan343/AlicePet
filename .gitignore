@@ -8,6 +8,7 @@ logs/
 # SwiftPM & macOS app bundle artifacts
 AlicePet/.build/
 AlicePet/.swiftpm/
+AlicePet/Packages/
 AlicePet.app/
 
 # Visual regression snapshot outputs (keep folder structure via .gitkeep)

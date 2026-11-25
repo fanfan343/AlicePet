@@ -380,6 +380,7 @@ final class VMCTrackingController {
 
         let useARKitPerfectSync = !arkitShapes.isEmpty
         if useARKitPerfectSync {
+            sanitizeARKitShapes(&arkitShapes, exprCtrl: exprCtrl, mask: mask)
             let payload = ARKitFaceBlendShapes(
                 timestamp: Date().timeIntervalSinceReferenceDate,
                 shapes: arkitShapes
@@ -410,6 +411,64 @@ final class VMCTrackingController {
             exprCtrl.setCustomExpressionWeight(name, weight: value)
         }
         appliedVMCCustomKeys = nextCustomKeys
+    }
+
+    /// Enforces biomechanical invariants across 52-channel ARKit PerfectSync weights before they hit
+    /// additive GPU morph targets:
+    /// 1. `mouthClose <= jawOpen` (on anime VRMs `mouthClose` is baked as `-jawOpen`, so exceeding
+    ///    `jawOpen` shoves the lower jaw upward into the upper lip/nose).
+    /// 2. Yields `eyeWide*` / `eyeSquint*` smoothly to procedural Auto-Blink (`cos = -0.78` on eyelids).
+    /// 3. Resolves direct opposing muscle pairs (`mouthSmile` vs `mouthFrown`, `browDown` vs `brow*Up`).
+    private func sanitizeARKitShapes(
+        _ shapes: inout [String: Float],
+        exprCtrl: VRMExpressionController,
+        mask: VMCFaceChannelMask
+    ) {
+        // 1. Jaw/lip closure invariant
+        let jawOpen = shapes[ARKitFaceBlendShapes.jawOpen] ?? 0.0
+        if let close = shapes[ARKitFaceBlendShapes.mouthClose], close > 0 {
+            let capFactor: Float = (mask == .speechAudio) ? 0.35 : 0.95
+            shapes[ARKitFaceBlendShapes.mouthClose] = min(close, jawOpen * capFactor)
+        }
+
+        // 2. Yield upper-eyelid opening/squinting to native Auto-Blink during speech-only streams
+        if !mask.contains(.eyesAndBlink) {
+            let blinkAll = exprCtrl.weight(for: .blink)
+            let blinkL = min(max(max(blinkAll, exprCtrl.weight(for: .blinkLeft)), 0.0), 1.0)
+            let blinkR = min(max(max(blinkAll, exprCtrl.weight(for: .blinkRight)), 0.0), 1.0)
+            if blinkL > 0.001 {
+                if let w = shapes[ARKitFaceBlendShapes.eyeWideLeft] {
+                    shapes[ARKitFaceBlendShapes.eyeWideLeft] = w * (1.0 - blinkL)
+                }
+                if let s = shapes[ARKitFaceBlendShapes.eyeSquintLeft] {
+                    shapes[ARKitFaceBlendShapes.eyeSquintLeft] = s * (1.0 - blinkL * 0.75)
+                }
+            }
+            if blinkR > 0.001 {
+                if let w = shapes[ARKitFaceBlendShapes.eyeWideRight] {
+                    shapes[ARKitFaceBlendShapes.eyeWideRight] = w * (1.0 - blinkR)
+                }
+                if let s = shapes[ARKitFaceBlendShapes.eyeSquintRight] {
+                    shapes[ARKitFaceBlendShapes.eyeSquintRight] = s * (1.0 - blinkR * 0.75)
+                }
+            }
+        }
+
+        // 3. Softly resolve directly opposing muscle pairs so vertices don't pull against themselves
+        func resolveOpposition(_ aKey: String, _ bKey: String) {
+            let a = shapes[aKey] ?? 0.0
+            let b = shapes[bKey] ?? 0.0
+            guard a > 0.01 && b > 0.01 else { return }
+            let overlap = min(a, b) * 0.75
+            shapes[aKey] = max(0.0, a - overlap)
+            shapes[bKey] = max(0.0, b - overlap)
+        }
+        resolveOpposition(ARKitFaceBlendShapes.mouthSmileLeft, ARKitFaceBlendShapes.mouthFrownLeft)
+        resolveOpposition(ARKitFaceBlendShapes.mouthSmileRight, ARKitFaceBlendShapes.mouthFrownRight)
+        resolveOpposition(ARKitFaceBlendShapes.browDownLeft, ARKitFaceBlendShapes.browOuterUpLeft)
+        resolveOpposition(ARKitFaceBlendShapes.browDownRight, ARKitFaceBlendShapes.browOuterUpRight)
+        resolveOpposition(ARKitFaceBlendShapes.browDownLeft, ARKitFaceBlendShapes.browInnerUp)
+        resolveOpposition(ARKitFaceBlendShapes.browDownRight, ARKitFaceBlendShapes.browInnerUp)
     }
 
     private func clearAppliedExpressions(on renderer: VRMRenderer, expressionMixer: ExpressionMixer) {

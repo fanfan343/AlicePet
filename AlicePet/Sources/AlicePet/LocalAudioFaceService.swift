@@ -192,7 +192,8 @@ final class LocalAudioFaceService {
             self.stderrPipe = errPipe
             self.isRunning = true
             self.activeAudioName = targetAudio.lastPathComponent
-            AppLogger.shared.info("Audio2Face", "Started LAM 52-channel audio test: \(targetAudio.lastPathComponent) (pid=\(proc.processIdentifier), port=\(port), \(params.prettyRecipeSummary()))")
+            let engineTag = useA2F ? "Audio2Face-3D Claire" : "LAM"
+            AppLogger.shared.info("Audio2Face", "Started \(engineTag) 52-channel audio test: \(targetAudio.lastPathComponent) (pid=\(proc.processIdentifier), port=\(port), \(params.prettyRecipeSummary()))")
             onStateChanged?()
             return true
         } catch {

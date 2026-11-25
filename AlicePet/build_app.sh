@@ -15,6 +15,22 @@ case "$CONFIG" in
 esac
 
 cd "$SCRIPT_DIR"
+
+# Ensure VRMMetalKit has our PerfectSync 64-active-morph patch applied cleanly
+PATCH_FILE="$SCRIPT_DIR/patches/VRMMetalKit-perfectsync-morphs.patch"
+EDIT_DIR="$SCRIPT_DIR/Packages/VRMMetalKit"
+if [ -f "$PATCH_FILE" ]; then
+    if [ ! -d "$EDIT_DIR/Sources" ] || ! grep -q '"name" : "edited"' "$SCRIPT_DIR/.build/workspace-state.json" 2>/dev/null; then
+        rm -rf "$EDIT_DIR"
+        echo "[AlicePet] Checking out editable VRMMetalKit for PerfectSync morph patch..."
+        swift package edit VRMMetalKit
+    fi
+    if ! grep -q "public static let maxActiveMorphs: Int = 64" "$EDIT_DIR/Sources/VRMMetalKit/Core/VRMConstants.swift"; then
+        echo "[AlicePet] Applying VRMMetalKit PerfectSync morph limits patch..."
+        git -C "$EDIT_DIR" apply "$PATCH_FILE"
+    fi
+fi
+
 echo "[AlicePet] Building ($CONFIG)..."
 swift build -c "$CONFIG"
 

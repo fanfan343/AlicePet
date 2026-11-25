@@ -453,7 +453,11 @@ final class PetController: NSObject, MTKViewDelegate {
             guard animationMixer.audioFaceChannel.start(port: 0) else { return false }
         }
         guard let boundPort = animationMixer.audioFaceChannel.boundPort else { return false }
-        // Preserve active mood/custom expressions (e.g. blush / starry eyes) so Alice can talk with emotion
+        // Clear preset moods / custom face recipes when full-face Audio2Face-3D drives emotions
+        // so VRM preset morphs never stack additively onto 52-channel ARKit emotion morphs.
+        if localAudioFaceService.params.engine == .a2fClaire {
+            expressionMixer.prepareForTrackingStart(on: renderer)
+        }
         let ok = localAudioFaceService.start(audioURL: audioURL, port: boundPort, maxSeconds: maxSeconds)
         if !ok {
             animationMixer.audioFaceChannel.stop(renderer: renderer, expressionMixer: expressionMixer)

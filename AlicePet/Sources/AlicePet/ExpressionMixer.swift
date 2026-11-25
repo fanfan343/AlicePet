@@ -18,10 +18,18 @@ final class ExpressionMixer {
     private var blinkTimer: Timer?
 
     init() {
-        var smoothing = SmoothingConfig.default
-        smoothing.perExpression[ARKitFaceBlendShapes.eyeBlinkLeft] = .ema(alpha: 0.55)
-        smoothing.perExpression[ARKitFaceBlendShapes.eyeBlinkRight] = .ema(alpha: 0.55)
-        smoothing.perExpression[ARKitFaceBlendShapes.jawOpen] = .ema(alpha: 0.5)
+        // Uniform low-latency EMA across all 52 ARKit channels so lip/brow/cheek stay phase-aligned;
+        // blinks bypass smoothing (register both camelCase and PascalCase for PerfectSync custom keys).
+        var smoothing = SmoothingConfig(global: .ema(alpha: 0.55))
+        for blinkKey in [
+            ARKitFaceBlendShapes.eyeBlinkLeft,
+            ARKitFaceBlendShapes.eyeBlinkRight,
+            "EyeBlinkLeft",
+            "EyeBlinkRight",
+            "blink",
+        ] {
+            smoothing.perExpression[blinkKey] = SmoothingFilter.none
+        }
         self.faceDriver = ARKitFaceDriver(mapper: .default, smoothing: smoothing)
     }
 

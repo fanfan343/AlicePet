@@ -46,6 +46,17 @@ from audio2face_vmc import (
     decode_audio_16k_mono,
 )
 
+IDX_BROW_DOWN_L = ARKIT_52_NAMES.index("browDownLeft")
+IDX_BROW_DOWN_R = ARKIT_52_NAMES.index("browDownRight")
+IDX_BROW_OUTER_L = ARKIT_52_NAMES.index("browOuterUpLeft")
+IDX_BROW_OUTER_R = ARKIT_52_NAMES.index("browOuterUpRight")
+IDX_MOUTH_FROWN_L = ARKIT_52_NAMES.index("mouthFrownLeft")
+IDX_MOUTH_FROWN_R = ARKIT_52_NAMES.index("mouthFrownRight")
+IDX_MOUTH_PRESS_L = ARKIT_52_NAMES.index("mouthPressLeft")
+IDX_MOUTH_PRESS_R = ARKIT_52_NAMES.index("mouthPressRight")
+IDX_MOUTH_SHRUG_U = ARKIT_52_NAMES.index("mouthShrugUpper")
+IDX_MOUTH_SHRUG_L = ARKIT_52_NAMES.index("mouthShrugLower")
+
 EXPLICIT_EMOTIONS = [
     "amazement",
     "anger",
@@ -272,33 +283,56 @@ def postprocess_a2f_for_anime(raw: np.ndarray, params: TuningParams) -> np.ndarr
         return raw
     out = raw.copy()
 
-    # Audio2Face-3D already produces strong realistic jaw/lip motion, so map 3.0 default slider -> ~1.35x gentle anime boost
-    jaw_scale = 0.55 + 0.28 * params.jaw_gain
-    vowel_scale = 0.60 + 0.25 * params.vowel_gain
-    upper_scale = 0.55 + 0.45 * params.upper_face_gain
+    # Audio2Face-3D already produces strong realistic jaw/lip motion; now that all 52 channels
+    # render cleanly without top-8 morph truncation, keep anime scaling balanced and clean.
+    jaw_scale = 0.60 + 0.22 * params.jaw_gain
+    vowel_scale = 0.60 + 0.22 * params.vowel_gain
+    upper_scale = 0.55 + 0.38 * params.upper_face_gain
 
+    # Fold lip closure cleanly into jawOpen and zero mouthClose afterward: on anime VRMs
+    # (Alicephil / HANA_Tool / VRoid), mouthClose is baked as exact -jawOpen (cos = -1.0),
+    # so sending mouthClose alongside or above jawOpen crushes the lower jaw upward.
+    raw_close = out[:, IDX_MOUTH_CLOSE].copy()
     out[:, IDX_JAW_OPEN] = np.clip(
-        out[:, IDX_JAW_OPEN] * jaw_scale - out[:, IDX_MOUTH_CLOSE] * (0.25 * params.lip_close_strength),
+        out[:, IDX_JAW_OPEN] * jaw_scale - raw_close * (0.28 * params.lip_close_strength),
         0.0,
         0.95,
     )
+    out[:, IDX_MOUTH_CLOSE] = 0.0
+
     for idx in (IDX_MOUTH_LOWER_L, IDX_MOUTH_LOWER_R, IDX_MOUTH_UPPER_L, IDX_MOUTH_UPPER_R):
-        out[:, idx] = np.clip(out[:, idx] * (0.65 + 0.30 * params.lip_reveal_gain), 0.0, 0.90)
+        out[:, idx] = np.clip(out[:, idx] * (0.65 + 0.25 * params.lip_reveal_gain), 0.0, 0.85)
     for idx in (IDX_MOUTH_PUCKER, IDX_MOUTH_FUNNEL, IDX_MOUTH_STRETCH_L, IDX_MOUTH_STRETCH_R, IDX_MOUTH_SMILE_L, IDX_MOUTH_SMILE_R):
-        out[:, idx] = np.clip(out[:, idx] * vowel_scale, 0.0, 0.95)
+        out[:, idx] = np.clip(out[:, idx] * vowel_scale, 0.0, 0.90)
+
+    # Damp realistic-skin lip-thickness micro-morphs that over-stack with smile/jaw on anime faces
+    for idx in (IDX_MOUTH_PRESS_L, IDX_MOUTH_PRESS_R, IDX_MOUTH_SHRUG_U, IDX_MOUTH_SHRUG_L):
+        out[:, idx] = np.clip(out[:, idx] * 0.50, 0.0, 0.45)
+
+    # Resolve directly opposing mouth/brow pairs so additive vertices never pull against each other
+    for a_idx, b_idx in (
+        (IDX_MOUTH_SMILE_L, IDX_MOUTH_FROWN_L),
+        (IDX_MOUTH_SMILE_R, IDX_MOUTH_FROWN_R),
+        (IDX_BROW_DOWN_L, IDX_BROW_OUTER_L),
+        (IDX_BROW_DOWN_R, IDX_BROW_OUTER_R),
+        (IDX_BROW_DOWN_L, IDX_BROW_INNER_UP),
+        (IDX_BROW_DOWN_R, IDX_BROW_INNER_UP),
+    ):
+        overlap = np.minimum(out[:, a_idx], out[:, b_idx]) * 0.75
+        out[:, a_idx] = np.maximum(0.0, out[:, a_idx] - overlap)
+        out[:, b_idx] = np.maximum(0.0, out[:, b_idx] - overlap)
 
     # Scale genuine upper-face channels (brows 0..4, cheeks 5..7, eyeSquint/Wide 18..21) — NO fake jaw->brow hack!
-    out[:, 0:8] = np.clip(out[:, 0:8] * upper_scale, 0.0, 0.95)
-    out[:, 18:22] = np.clip(out[:, 18:22] * upper_scale, 0.0, 0.90)
+    out[:, 0:8] = np.clip(out[:, 0:8] * upper_scale, 0.0, 0.90)
+    out[:, 18:22] = np.clip(out[:, 18:22] * (0.50 + 0.30 * params.upper_face_gain), 0.0, 0.75)
 
     # Zero out eyeLook/eyeBlink so Swift Layer 2 keeps Mouse LookAt + native Auto-Blink 100% clean
     out[:, 8:18] = 0.0
 
-    # Temporal smoothing
-    if params.smoothing > 0.01:
-        alpha = max(0.15, min(1.0, 1.0 - params.smoothing))
-        for i in range(1, len(out)):
-            out[i] = alpha * out[i] + (1.0 - alpha) * out[i - 1]
+    # Temporal smoothing (always apply a light NVIDIA-style anti-chatter floor alpha <= 0.75)
+    alpha = max(0.15, min(0.75, 1.0 - params.smoothing))
+    for i in range(1, len(out)):
+        out[i] = alpha * out[i] + (1.0 - alpha) * out[i - 1]
 
     return np.clip(out, 0.0, 1.0)
 

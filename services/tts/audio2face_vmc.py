@@ -183,9 +183,10 @@ def postprocess_blendshapes(raw: np.ndarray, params: TuningParams) -> np.ndarray
         return raw
     out = raw.copy()
 
-    # 1. Jaw open & lip-close balance
+    # 1. Jaw open & lip-close balance (fold mouthClose into jawOpen and zero mouthClose so
+    # anime VRMs with mouthClose == -jawOpen never invert the lower jaw upward)
     lower_avg = 0.5 * (out[:, IDX_MOUTH_LOWER_L] + out[:, IDX_MOUTH_LOWER_R])
-    close_w = out[:, IDX_MOUTH_CLOSE]
+    close_w = out[:, IDX_MOUTH_CLOSE].copy()
     lower_couple = 0.11 * params.jaw_gain  # gentle natural lift from lower lip drop
     out[:, IDX_JAW_OPEN] = np.clip(
         out[:, IDX_JAW_OPEN] * params.jaw_gain
@@ -194,6 +195,7 @@ def postprocess_blendshapes(raw: np.ndarray, params: TuningParams) -> np.ndarray
         0.0,
         0.95,
     )
+    out[:, IDX_MOUTH_CLOSE] = 0.0
 
     # 2. Lip reveal (teeth / upper & lower lip pull)
     out[:, IDX_MOUTH_LOWER_L] = np.clip(out[:, IDX_MOUTH_LOWER_L] * params.lip_reveal_gain, 0.0, 0.90)

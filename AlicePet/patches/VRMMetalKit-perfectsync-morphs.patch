@@ -1,0 +1,26 @@
+diff --git a/Sources/VRMMetalKit/Core/VRMConstants.swift b/Sources/VRMMetalKit/Core/VRMConstants.swift
+index 1111111..2222222 100644
+--- a/Sources/VRMMetalKit/Core/VRMConstants.swift
++++ b/Sources/VRMMetalKit/Core/VRMConstants.swift
+@@ -43,7 +43,9 @@ public enum VRMConstants {
+         public static let defaultFarPlane: Float = 100.0
+ 
+         /// Maximum number of morph targets simultaneously active during vertex shading.
+-        public static let maxActiveMorphs: Int = 8
++        /// Raised from 8 to 64 for 52-channel ARKit PerfectSync + blink/outfit morphs.
++        /// MorphAccumulate.metal loops dynamically over activeCount (64 * 8B = 512B << 4KB setBytes limit).
++        public static let maxActiveMorphs: Int = 64
+ 
+         /// Highest addressable morph index, and therefore the length (in
+         /// floats) of the dense weights buffer.
+@@ -61,7 +63,8 @@ public enum VRMConstants {
+         /// Keep it comfortably above real avatars: avatars made for VRChat can
+         /// be baked with blendshape sets of 150+ targets (expression binds
+         /// observed at index 150), which a 64 cap silently discarded — every
+         /// emotion preset dropped, leaving the face static.
+-        public static let maxMorphTargets: Int = 256
++        /// Raised to 512 to cover high-detail avatars (e.g. 297+ Body morph targets).
++        public static let maxMorphTargets: Int = 512
+ 
+         /// Unused. Morph accumulation always runs on the GPU compute path; there
+         /// is no CPU evaluation to switch away from. Kept for source compatibility.
