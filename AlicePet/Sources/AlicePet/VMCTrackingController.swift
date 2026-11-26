@@ -75,6 +75,22 @@ final class VMCTrackingController {
         let p = driver.convention.convert(position: root.position)
         return SIMD2<Float>(p.x, p.z)
     }
+
+    /// Instantaneous speech energy in `[0, 1]` derived from live mouth/jaw blendshapes
+    /// (used by `SpeechGestureLayer` to drive procedural talking-hands beats).
+    var speechEnergy: Float {
+        guard isListening, hasFreshFrame else { return 0 }
+        let shapes = driver.frame.blendShapes
+        guard !shapes.isEmpty else { return 0 }
+        var peak: Float = 0
+        for (rawKey, val) in shapes {
+            let k = rawKey.lowercased()
+            if k == "jawopen" || k == "aa" || k == "a" || k == "oh" || k == "o" || k == "mouthopen" {
+                peak = max(peak, val)
+            }
+        }
+        return min(max(peak, 0), 1)
+    }
     private(set) var lastArmIKDiagnostics: [ArmIKRetargeter.ArmDiagnostics] = []
     private var restWorldCacheModelID: ObjectIdentifier?
     private var restWorldCache: [VRMHumanoidBone: simd_quatf] = [:]

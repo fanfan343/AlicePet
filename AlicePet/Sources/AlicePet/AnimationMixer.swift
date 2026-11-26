@@ -17,12 +17,14 @@ import simd
 final class AnimationMixer {
     enum BodyLayerSource: String {
         case authorPose = "AuthorPose"
+        case vrma = "VRMA"
         case externalVMC = "ExternalVMC"
         case ardy = "ARDY"
 
         var displayLabel: String {
             switch self {
             case .authorPose: return "作者姿态"
+            case .vrma: return "VRMA 动画"
             case .externalVMC: return "外部/精捕 VMC"
             case .ardy: return "ARDY Mini"
             }
@@ -31,6 +33,7 @@ final class AnimationMixer {
 
     enum FaceLayerSource: String {
         case procedural = "Procedural"
+        case vrma = "VRMA"
         case externalVMC = "ExternalVMC"
         case audioFace = "Audio2Face"
     }
@@ -39,6 +42,10 @@ final class AnimationMixer {
     let externalChannel = VMCTrackingController()
     let ardyChannel = VMCTrackingController()
     let audioFaceChannel = VMCTrackingController()
+    /// Standard `.vrma` (`VRMC_vrm_animation`) clip player backed by `VRMMetalKit`.
+    let vrmaPlayer = VRMAPlaybackController()
+    /// Zero-token Layer 1 additive emotional posture + procedural talking-hands beats.
+    let speechGestureLayer = SpeechGestureLayer()
 
     /// Additive blend weight for LAM speech head nods when layered over an AI/VMC full-body base.
     var additiveHeadWeightOverFullBody: Float = 0.65
@@ -97,6 +104,8 @@ final class AnimationMixer {
         externalChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
         ardyChannel.stop()
         audioFaceChannel.stop(renderer: renderer, expressionMixer: expressionMixer)
+        vrmaPlayer.stop(expressionMixer: expressionMixer, renderer: renderer)
+        speechGestureLayer.reset()
         resetCrossfadeState()
     }
 
@@ -107,6 +116,7 @@ final class AnimationMixer {
         poseController: PoseController,
         recipeStore: AssetRecipeStore,
         expressionMixer: ExpressionMixer,
+        emotionStateMachine: EmotionStateMachine? = nil,
         elapsed: Float,
         dt: TimeInterval,
         idleBreathingEnabled: Bool,
@@ -134,6 +144,16 @@ final class AnimationMixer {
                 elapsed: elapsed,
                 idleBreathingEnabled: idleBreathingEnabled
             )
+        case .vrma:
+            poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
+            if !vrmaPlayer.advanceAndApply(dt: Float(dt), model: model) {
+                poseController.applyProceduralFrame(
+                    to: model,
+                    restTransforms: poseController.restNodeTransforms,
+                    elapsed: elapsed,
+                    idleBreathingEnabled: idleBreathingEnabled
+                )
+            }
         case .externalVMC:
             poseController.applyBasePose(to: model, restTransforms: poseController.restNodeTransforms)
             _ = externalChannel.applyBonesOnly(to: model)
@@ -168,10 +188,18 @@ final class AnimationMixer {
             }
         }
 
-        // Snapshot pure Layer 0 pose (before Layer 1 additive nods) for future crossfades
+        // Snapshot pure Layer 0 pose (before Layer 1 additive overlays) for future crossfades
         captureBaseBodyPose(from: model)
 
-        // MARK: Layer 1 — Additive Speech Micro-Motion (Neck + Head)
+        // MARK: Layer 1 — Additive Speech Micro-Motion, Talking-Hands Beats & Emotional Posture
+        speechGestureLayer.apply(
+            to: model,
+            activeBodySource: activeBodySource,
+            rawSpeechEnergy: audioFaceChannel.speechEnergy,
+            emotionState: emotionStateMachine,
+            elapsed: elapsed,
+            dt: dt
+        )
         if audioFaceChannel.hasFreshFrame {
             let additiveWeight: Float = (activeBodySource == .authorPose) ? 1.0 : additiveHeadWeightOverFullBody
             _ = audioFaceChannel.applyBonesAdditive(
@@ -187,6 +215,7 @@ final class AnimationMixer {
         let nextFace: FaceLayerSource
         if audioFaceChannel.hasFreshFrame {
             externalChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
+            vrmaPlayer.clearAppliedExpressionsIfNeeded(on: renderer, expressionMixer: expressionMixer)
             // Speech audio drives LowerFace (jaw/mouth/tongue) + UpperFace (brows/cheeks/squint),
             // leaving Eyes & Blink free so Mouse LookAt, natural saccades, and Auto-Blink stay alive!
             _ = audioFaceChannel.applyBlendShapesOnly(
@@ -201,6 +230,7 @@ final class AnimationMixer {
             nextFace = .audioFace
         } else if externalChannel.hasFreshFrame && externalChannel.receivedBlendShapeCount > 0 {
             audioFaceChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
+            vrmaPlayer.clearAppliedExpressionsIfNeeded(on: renderer, expressionMixer: expressionMixer)
             _ = externalChannel.applyBlendShapesOnly(
                 on: renderer,
                 expressionMixer: expressionMixer,
@@ -210,9 +240,19 @@ final class AnimationMixer {
                 renderer.lookAtController?.enabled = false
             }
             nextFace = .externalVMC
+        } else if activeBodySource == .vrma && vrmaPlayer.hasExpressionTracks {
+            audioFaceChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
+            externalChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
+            vrmaPlayer.applyExpressionsIfPresent(to: renderer)
+            if renderer.lookAtController?.enabled == false {
+                renderer.lookAtController?.enabled = true
+            }
+            expressionMixer.updateLookAt(on: renderer, poseMode: poseMode, window: window)
+            nextFace = .vrma
         } else {
             audioFaceChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
             externalChannel.clearBlendShapesIfNeeded(on: renderer, expressionMixer: expressionMixer)
+            vrmaPlayer.clearAppliedExpressionsIfNeeded(on: renderer, expressionMixer: expressionMixer)
             if renderer.lookAtController?.enabled == false {
                 renderer.lookAtController?.enabled = true
             }
@@ -230,17 +270,20 @@ final class AnimationMixer {
     private func resolveActiveBodySource() -> BodyLayerSource {
         let hasArdy = ardyChannel.hasFreshFrame && ardyChannel.receivedBoneCount > 0
         let hasExt = externalChannel.hasFreshFrame && externalChannel.receivedBoneCount > 0
+        let hasVRMA = vrmaPlayer.isActive
 
         if let preferred = preferredFullBodySource {
             switch preferred {
             case .ardy where hasArdy: return .ardy
             case .externalVMC where hasExt: return .externalVMC
+            case .vrma where hasVRMA: return .vrma
             default: break
             }
         }
 
         if hasArdy { return .ardy }
         if hasExt { return .externalVMC }
+        if hasVRMA { return .vrma }
         return .authorPose
     }
 
