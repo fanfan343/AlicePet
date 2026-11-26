@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""One-shot single-image metric depth + camera ground-plane estimator (MoGe-2) for AlicePet Picture-World.
+"""One-shot single-image metric depth + camera ground-plane + walkable grid estimator (MoGe-2)
+for AlicePet Picture-World.
 
 Takes any 2D room illustration or photo, runs Microsoft MoGe-2 (ViT-S/B with metric scale & normals),
-fits the floor plane via RANSAC on upward-pointing normals, and writes a lightweight scene bundle:
+fits the floor plane + curved ground surface, builds a top-down walkable grid, and writes:
   - bg.png        (original RGB image)
-  - depth.bin     (float32 metric depth map, positive camera-forward Z in meters)
+  - depth.bin     (float32 metric depth map at native resolution, positive camera-forward Z in meters)
   - depth_vis.png (false-color depth preview for inspection)
-  - scene.json    (exact camera extrinsics/FOV aligned so world Y=0 is the room floor)
+  - scene.json    (camera extrinsics/FOV, fitted ground surface, walkableGrid, and any preserved anchors)
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ from PIL import Image
 import scene_geometry
 import scene_grid
 import scene_qc
-import scene_seats
 
 
 def fit_floor_plane_ransac(
@@ -34,7 +34,7 @@ def fit_floor_plane_ransac(
     valid_mask: np.ndarray,
     seed: int = 42,
 ) -> tuple[np.ndarray, float, np.ndarray]:
-    """Fits the true lowest horizontal floor plane `n . p + d = 0` in right-handed camera space
+    """Fits the lowest horizontal floor plane `n . p + d = 0` in right-handed camera space
     (+X right, +Y up, -Z forward), ignoring elevated horizontal surfaces like tabletops/desks.
 
     Returns `(normal_unit, d, floor_mask)` with `normal_unit.y > 0` and camera height `h = d > 0`.
@@ -45,7 +45,6 @@ def fit_floor_plane_ransac(
     z_dist = -points_cam[..., 2]
     cand = valid_mask & (ys > int(h * 0.42)) & (z_dist > 0.6) & (z_dist < 12.0)
 
-    # 1. Estimate room vertical axis directly from MoGe-2 upward-facing surface normals
     if normals_cam is not None:
         up_cand = cand & (normals_cam[..., 1] > 0.72)
         if int(up_cand.sum()) >= 300:
@@ -55,18 +54,14 @@ def fit_floor_plane_ransac(
                 n_up = n_med / n_norm
                 if n_up[1] < 0.0:
                     n_up = -n_up
-                # Project all upward-facing points onto gravity axis:
-                # d_i = -(n_up . p_i) = vertical distance below camera (larger = lower = real floor, smaller = tabletop)
                 up_pts = points_cam[up_cand]
                 heights_below_cam = -(up_pts @ n_up)
                 valid_h = heights_below_cam[(heights_below_cam > 0.5) & (heights_below_cam < 3.8)]
                 if len(valid_h) >= 100:
-                    # Pick the lowest substantial horizontal surface (80th-95th percentile band ignores tabletops)
                     h_floor_hi = float(np.percentile(valid_h, 92))
                     floor_band = valid_h[(valid_h >= h_floor_hi - 0.18) & (valid_h <= h_floor_hi + 0.12)]
                     d_floor = float(np.median(floor_band)) if len(floor_band) >= 30 else h_floor_hi
 
-                    # Refine plane normal via SVD on actual floor-band points
                     full_h = -(points_cam @ n_up)
                     floor_mask = up_cand & (np.abs(full_h - d_floor) < 0.12)
                     if int(floor_mask.sum()) >= 200:
@@ -85,7 +80,6 @@ def fit_floor_plane_ransac(
                     floor_mask = valid_mask & (np.abs(points_cam @ n_up + d_floor) < 0.10) & (ys > int(h * 0.40))
                     return n_up, d_floor, floor_mask
 
-    # Fallback if no normals available
     n_fallback = np.array([0.0, 0.94, 0.34], dtype=np.float64)
     n_fallback /= float(np.linalg.norm(n_fallback))
     return n_fallback, 1.30, cand
@@ -105,16 +99,12 @@ def pick_spawn_point(
 
     if len(pts) >= 20:
         z_dists = -pts[:, 2]
-        # Prefer mid-foreground floor (~40th percentile depth, clamped to 2.0m..3.8m)
         target_z = float(np.clip(np.percentile(z_dists, 45), 2.0, 3.8))
-        # Find floor point closest to x=0 and z=-target_z
         scores = np.abs(pts[:, 0]) * 1.5 + np.abs(z_dists - target_z)
         chosen = pts[int(np.argmin(scores))].astype(np.float64)
-        # Project exactly onto fitted floor plane
         dist = float(np.dot(normal_cam, chosen) + plane_d)
         return chosen - dist * normal_cam
 
-    # Fallback: intersect camera ray (0, -0.35, -1) with floor plane
     ray = np.array([0.0, -0.35, -1.0], dtype=np.float64)
     denom = float(np.dot(normal_cam, ray))
     t = -plane_d / denom if abs(denom) > 1e-4 else 2.6
@@ -129,7 +119,6 @@ def build_world_camera(
     """Builds exact world-space (camPos, camTarget, camUp, R_c2w) where world origin (0,0,0) = spawn on floor Y=0."""
     up_cam = normal_cam / float(np.linalg.norm(normal_cam))
     cam_fwd_in_cam = np.array([0.0, 0.0, -1.0], dtype=np.float64)
-    # Project camera forward onto floor plane so world -Z is horizontal forward into the room
     fwd_horiz_cam = cam_fwd_in_cam - float(np.dot(cam_fwd_in_cam, up_cam)) * up_cam
     fwd_norm = float(np.linalg.norm(fwd_horiz_cam))
     if fwd_norm < 1e-4:
@@ -139,10 +128,8 @@ def build_world_camera(
 
     right_cam = np.cross(fwd_horiz_cam, up_cam)
     right_cam = right_cam / float(np.linalg.norm(right_cam))
-    # World +Z points toward viewer (opposite of fwd_horiz_cam), so right x up = +Z
     z_world_in_cam = -fwd_horiz_cam
 
-    # Columns of R_w2c are world basis vectors expressed in camera space -> R_c2w = R_w2c.T
     R_w2c = np.column_stack((right_cam, up_cam, z_world_in_cam))
     R_c2w = R_w2c.T
 
@@ -155,28 +142,17 @@ def build_world_camera(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="MoGe-2 single-image scene depth & floor estimator for AlicePet")
+    parser = argparse.ArgumentParser(description="MoGe-2 single-image scene depth & walkable grid estimator for AlicePet")
     parser.add_argument("--image", required=True, help="Input 2D room/scene image path")
     parser.add_argument("--out-dir", required=True, help="Output scene directory")
     parser.add_argument("--model", default="Ruicheng/moge-2-vits-normal", help="MoGe-2 HuggingFace model ID")
     parser.add_argument("--name", default="", help="Display name for scene.json")
     parser.add_argument("--depth-max-dim", type=int, default=0,
-                        help="Max dimension for stored depth.bin; 0 keeps MoGe's native "
-                             "resolution. Downsampling is what makes depth-buffer occlusion "
-                             "edges stair-step against sharp illustration lineart.")
+                        help="Max dimension for stored depth.bin; 0 keeps MoGe's native resolution.")
     parser.add_argument("--device", default="auto", choices=("auto", "mps", "cpu"))
     parser.add_argument("--grid-cell", type=float, default=scene_geometry.CELL_M,
                         help="Walkable grid cell size in metres (default 0.06)")
-    parser.add_argument("--no-auto-anchors", action="store_true",
-                        help="Skip automatic seat-anchor detection (depth + grid only)")
-    parser.add_argument("--seats", default="auto", choices=("auto", "vision", "geometry", "off"),
-                        help="Seat detection: 'auto' = COCO detector with geometric fallback "
-                             "(default), 'vision' = detector only, 'geometry' = no model at all")
-    parser.add_argument("--keep-anchors", action="store_true",
-                        help="Keep anchors already present in an existing scene.json")
-    parser.add_argument("--no-qc", action="store_true", help="Skip the top-down QC overlay render")
-    parser.add_argument("--dump-cloud", action="store_true",
-                        help="Also save points_world/normals_world/valid as .npy for tuning")
+    parser.add_argument("--no-qc", action="store_true", help="Skip the top-down and image QC overlays")
     args = parser.parse_args()
 
     img_path = Path(args.image).expanduser().resolve()
@@ -187,7 +163,6 @@ def main() -> int:
     img_w, img_h = pil_img.size
     rgb = np.asarray(pil_img, dtype=np.uint8)
 
-    # Save canonical bg.png
     bg_out = out_dir / "bg.png"
     pil_img.save(bg_out)
 
@@ -220,24 +195,19 @@ def main() -> int:
             raise
     infer_ms = (time.monotonic() - t1) * 1000.0
 
-    # Extract MoGe-2 outputs (OpenCV convention: +X right, +Y down, +Z forward)
-    points_cv = output["points"].detach().cpu().numpy().astype(np.float64)     # (H, W, 3)
-    depth_raw = output["depth"].detach().cpu().numpy().astype(np.float32)      # (H, W)
-    mask = output["mask"].detach().cpu().numpy().astype(bool)                  # (H, W)
-    intrinsics = output["intrinsics"].detach().cpu().numpy().astype(np.float64)  # (3, 3) normalized
+    points_cv = output["points"].detach().cpu().numpy().astype(np.float64)
+    depth_raw = output["depth"].detach().cpu().numpy().astype(np.float32)
+    mask = output["mask"].detach().cpu().numpy().astype(bool)
+    intrinsics = output["intrinsics"].detach().cpu().numpy().astype(np.float64)
     normals_cv = output["normal"].detach().cpu().numpy().astype(np.float64) if "normal" in output else None
 
-    # Normalized intrinsics: fy = intrinsics[1, 1] -> fovY = 2 * atan(0.5 / fy)
     fy = float(intrinsics[1, 1])
-    fov_y_deg = float(np.degrees(2.0 * math.atan(0.5 / max(fy, 1e-4))))
-    fov_y_deg = float(np.clip(fov_y_deg, 20.0, 90.0))
+    fov_y_deg = float(np.clip(np.degrees(2.0 * math.atan(0.5 / max(fy, 1e-4))), 20.0, 90.0))
 
-    # Convert OpenCV (+X right, +Y down, +Z forward) -> Right-Handed Metal/VRM camera (+X right, +Y up, -Z forward)
     points_cam = np.stack([points_cv[..., 0], -points_cv[..., 1], -points_cv[..., 2]], axis=-1)
     normals_cam = None
     if normals_cv is not None:
         normals_cam = np.stack([normals_cv[..., 0], -normals_cv[..., 1], -normals_cv[..., 2]], axis=-1)
-        # Ensure normals face toward the camera (dot with -points_cam > 0 on average)
         if np.median(normals_cam[mask, 1][normals_cam[mask, 1] != 0]) < -0.5:
             normals_cam = -normals_cam
 
@@ -246,10 +216,8 @@ def main() -> int:
     spawn_cam = pick_spawn_point(points_cam, floor_mask, floor_n, floor_d)
     cam_pos, cam_target, cam_up, R_c2w = build_world_camera(floor_n, spawn_cam)
 
-    # Fill invalid/sky depth pixels cleanly with far depth (48m)
     depth_clean = np.where(valid, np.clip(depth_raw, 0.1, 48.0), 48.0).astype(np.float32)
 
-    # Resize depth to compact depth_max_dim preserving aspect ratio
     max_dim = args.depth_max_dim if args.depth_max_dim > 0 else max(img_w, img_h)
     scale = min(1.0, max_dim / float(max(img_w, img_h)))
     dep_w = max(64, int(round(img_w * scale)))
@@ -257,44 +225,20 @@ def main() -> int:
     depth_resized = (depth_clean if (dep_w, dep_h) == (img_w, img_h)
                      else cv2.resize(depth_clean, (dep_w, dep_h),
                                      interpolation=cv2.INTER_NEAREST)).astype(np.float32)
+    depth_resized.tofile(out_dir / "depth.bin")
 
-    depth_bin = out_dir / "depth.bin"
-    depth_resized.tofile(depth_bin)
-
-    # Save false-color depth preview
     d_vis = np.clip(depth_resized, 0.5, 10.0)
     d_norm = ((1.0 - (d_vis - 0.5) / 9.5) * 255.0).astype(np.uint8)
-    d_color = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
-    cv2.imwrite(str(out_dir / "depth_vis.png"), d_color)
+    cv2.imwrite(str(out_dir / "depth_vis.png"), cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO))
 
-    # --- Route B: automatic walkable grid + seat anchors -------------------------------
     t2 = time.monotonic()
     points_world, normals_world = scene_geometry.camera_to_world(
         points_cam, normals_cam, spawn_cam, R_c2w)
     cloud = scene_geometry.RoomCloud.build(points_world, normals_world, valid)
     grid = scene_grid.build_walkable_grid(cloud, cell=args.grid_cell)
     grid_json = grid.to_json(ground=cloud.ground)
-
-    if args.dump_cloud:
-        np.save(out_dir / "points_world.npy", points_world.astype(np.float32))
-        if normals_world is not None:
-            np.save(out_dir / "normals_world.npy", normals_world.astype(np.float32))
-        np.save(out_dir / "valid.npy", valid)
+    grid_ms = (time.monotonic() - t2) * 1000.0
     walk_min, walk_max = grid_json["boundsMin"], grid_json["boundsMax"]
-
-    anchors: list[dict] = []
-    seat_candidates: list[scene_seats.SeatCandidate] = []
-    seat_source = "off"
-    if not args.no_auto_anchors and args.seats != "off":
-        t_detect = time.monotonic()
-        seat_candidates, seat_source = scene_seats.detect_seats(
-            img_path, cloud, mode=args.seats, cell=args.grid_cell)
-        t_anchors = time.monotonic()
-        anchors = scene_seats.solve_seat_anchors(seat_candidates, grid, cloud)
-        print(f"[Scene] Timing: ground+grid+index={(t_detect - t2)*1000:.0f}ms "
-              f"seats={(t_anchors - t_detect)*1000:.0f}ms anchors={(time.monotonic() - t_anchors)*1000:.0f}ms",
-              flush=True)
-    semantics_ms = (time.monotonic() - t2) * 1000.0
 
     scene_cfg = {
         "version": 1,
@@ -318,42 +262,31 @@ def main() -> int:
         "walkableGrid": grid_json,
     }
 
-    existing_anchors = None
+    # Preserve any hand-authored or VLM-authored anchors already present in scene.json.
+    existing_anchors: list[dict] = []
     scene_json_path = out_dir / "scene.json"
     if scene_json_path.exists():
         try:
-            existing_anchors = json.loads(scene_json_path.read_text(encoding="utf-8")).get("anchors")
+            loaded = json.loads(scene_json_path.read_text(encoding="utf-8")).get("anchors")
+            if isinstance(loaded, list) and loaded:
+                existing_anchors = loaded
+                scene_cfg["anchors"] = existing_anchors
         except (json.JSONDecodeError, OSError):
-            existing_anchors = None
-
-    use_auto = anchors and not (args.keep_anchors and existing_anchors)
-    if args.keep_anchors and existing_anchors:
-        scene_cfg["anchors"] = existing_anchors
-    elif use_auto:
-        scene_cfg["anchors"] = [
-            {k: v for k, v in a.items() if not k.startswith("_")} for a in anchors
-        ]
-    elif existing_anchors:
-        scene_cfg["anchors"] = existing_anchors
+            pass
 
     scene_json_path.write_text(json.dumps(scene_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
     if not args.no_qc:
         try:
-            scene_qc.render_qc_overlay(grid, anchors, out_dir / "qc_topdown.png")
-            scene_qc.render_image_overlay(
-                scene_cfg, bg_out, seat_candidates, anchors, out_dir / "qc_candidates.png")
-            scene_qc.render_grid_on_image(
-                scene_cfg, bg_out, grid, out_dir / "qc_grid_on_image.png")
-        except Exception as exc:  # QC art must never break a scene build
+            scene_qc.render_qc_overlay(grid, existing_anchors, out_dir / "qc_topdown.png")
+            scene_qc.render_grid_on_image(scene_cfg, bg_out, grid, out_dir / "qc_grid_on_image.png")
+        except Exception as exc:
             print(f"[Scene] QC overlay skipped ({exc})", flush=True)
 
-    cam_height = float(cam_pos[1])
-    spawn_dist = float(np.linalg.norm(cam_pos))
     walkable_cells = int(grid_json["walkableCount"])
     print(
-        f"[Scene] OK! load={load_ms:.0f}ms infer={infer_ms:.0f}ms semantics={semantics_ms:.0f}ms ({device}) "
-        f"fovY={fov_y_deg:.1f}° camHeight={cam_height:.2f}m spawnDist={spawn_dist:.2f}m "
+        f"[Scene] OK! load={load_ms:.0f}ms infer={infer_ms:.0f}ms grid={grid_ms:.0f}ms ({device}) "
+        f"fovY={fov_y_deg:.1f}° camHeight={float(cam_pos[1]):.2f}m spawnDist={float(np.linalg.norm(cam_pos)):.2f}m "
         f"floorInliers={int(floor_mask.sum())} -> {out_dir}",
         flush=True,
     )
@@ -363,20 +296,6 @@ def main() -> int:
         f"bounds X[{walk_min[0]:+.2f},{walk_max[0]:+.2f}] Z[{walk_min[1]:+.2f},{walk_max[1]:+.2f}]",
         flush=True,
     )
-    if seat_candidates:
-        print(f"[Scene] Seat candidates ({seat_source}): {len(seat_candidates)}", flush=True)
-    for a in anchors:
-        print(
-            f"[Scene]   anchor {a['id']} '{a['label']}' seat={a['seatHeight']:.2f}m "
-            f"(+{a['_rel']:.2f}m above local floor) "
-            f"facing={math.degrees(a['facingYawRad']):+.0f}° "
-            f"target=({a['_x']:+.2f},{a['_z']:+.2f}) "
-            f"approach=({a['approachPosition'][0]:+.2f},{a['approachPosition'][2]:+.2f}) "
-            f"score={a['_score']:.2f}",
-            flush=True,
-        )
-    if args.no_auto_anchors:
-        print("[Scene] Auto anchors disabled (--no-auto-anchors)", flush=True)
     return 0
 
 

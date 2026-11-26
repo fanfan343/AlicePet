@@ -1,37 +1,31 @@
 #!/usr/bin/env python3
-"""Room geometry for the AlicePet Picture-World: point cloud, ground surface, spatial index.
+"""Room geometry for the AlicePet Picture-World: point cloud and fitted ground surface.
 
-The one idea everything else builds on: the reconstructed floor is *not* the Y=0 plane.
-Depth from a flat-shaded illustration drifts 15-30 cm across a room, so every "is this the
-floor / how high is this cushion" question is answered relative to a fitted ground surface.
+The reconstructed floor from a single image is not an exact Y=0 plane: monocular depth
+on flat-shaded illustrations drifts 15-30 cm across a room. Fitting a smooth quadratic
+ground surface lets walkability and avatar grounding stay relative to the actual floor.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
-from scipy import ndimage
 
 GROUND_FIT_BAND = 0.80    # points this close to the plane seed the ground-surface fit
 GROUND_TOL = 0.10         # a point this close above local ground IS floor
 CELL_M = 0.06             # walkable grid resolution
-OPENNESS_RADIUS_M = 0.45  # standing room measured around a candidate approach spot
+OPENNESS_RADIUS_M = 0.45  # standing room measured around a candidate spawn spot
 
-
-# --- Data model -----------------------------------------------------------------------
 
 @dataclass
 class RoomCloud:
-    """The scene's metric point cloud, indexed and measured against its own floor."""
+    """The scene's metric point cloud measured against its own fitted floor."""
 
-    pts: np.ndarray                     # (N, 3) world position, valid points only
-    normals: np.ndarray                 # (N, 3) world normals
-    height: np.ndarray                  # (N,) height above the *local* ground
-    ground: np.ndarray                  # (6,) quadratic ground coefficients
-    valid: np.ndarray = field(repr=False, default=None)   # (H, W) source pixel mask
-    index: "PointIndex" = field(repr=False, default=None)
+    pts: np.ndarray        # (N, 3) world position, valid points only
+    normals: np.ndarray    # (N, 3) world normals
+    height: np.ndarray     # (N,) height above the local ground
+    ground: np.ndarray     # (6,) quadratic ground coefficients
 
     @classmethod
     def build(cls, points_world: np.ndarray, normals_world: np.ndarray | None,
@@ -41,29 +35,10 @@ class RoomCloud:
                    else np.tile(np.array([0.0, 1.0, 0.0]), (len(pts), 1)))
         ground = _fit_ground_surface(pts, normals)
         height = pts[:, 1] - _eval_ground(ground, pts[:, 0], pts[:, 2])
-        return cls(pts=pts, normals=normals, height=height, ground=ground,
-                   valid=valid, index=PointIndex(pts))
-
-    def pixel_patch(self, mask_np: np.ndarray, erode: int = 2) -> np.ndarray:
-        """Instance mask at image resolution -> boolean selector in this cloud's point order."""
-        if mask_np.shape == self.valid.shape:
-            small = mask_np & self.valid          # native depth: no resampling needed at all
-        else:
-            h, w = self.valid.shape
-            ys = np.clip((np.arange(h) + 0.5) * (mask_np.shape[0] / h), 0,
-                         mask_np.shape[0] - 1).astype(np.int32)
-            xs = np.clip((np.arange(w) + 0.5) * (mask_np.shape[1] / w), 0,
-                         mask_np.shape[1] - 1).astype(np.int32)
-            small = mask_np[np.ix_(ys, xs)] & self.valid
-        if erode:
-            small = ndimage.binary_erosion(small, structure=np.ones((3, 3)), iterations=erode)
-        return small[self.valid]
+        return cls(pts=pts, normals=normals, height=height, ground=ground)
 
     def ground_at(self, x: float, z: float) -> float:
         return float(_eval_ground(self.ground, np.array([x]), np.array([z]))[0])
-
-    def subset(self, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        return self.pts[mask], self.normals[mask], self.height[mask]
 
 
 def camera_to_world(points_cam: np.ndarray, normals_cam: np.ndarray | None,
@@ -95,7 +70,6 @@ def _fit_ground_surface(pts: np.ndarray, normals: np.ndarray,
     if int(seed.sum()) < 500:
         return np.zeros(6)
 
-    # Subsample: the fit is smooth, and 3M points buy nothing over ~200k.
     idx = np.nonzero(seed)[0]
     if len(idx) > 200_000:
         idx = idx[np.random.default_rng(7).choice(len(idx), 200_000, replace=False)]
@@ -111,65 +85,9 @@ def _fit_ground_surface(pts: np.ndarray, normals: np.ndarray,
                   x[keep] ** 2, x[keep] * z[keep], z[keep] ** 2]
         coef, *_ = np.linalg.lstsq(A, yy[keep], rcond=None)
 
-    # A wild fit is worse than no fit: fall back to the plane if it cannot explain the floor.
     resid = yy - _eval_ground(coef, x, z)
     if float(np.sqrt(np.mean(resid ** 2))) > 0.35:
         A = np.c_[np.ones(len(x)), x, z]
         plane, *_ = np.linalg.lstsq(A, yy, rcond=None)
         coef = np.array([plane[0], plane[1], plane[2], 0.0, 0.0, 0.0])
     return coef
-
-
-
-class PointIndex:
-    """Uniform XZ bucket index for local 3D queries.
-
-    The seat scorer asks 'what stands behind / above this pad?' dozens of times per
-    candidate. Scanning the full cloud each time meant copying ~80 MB per call; bucketing
-    once and touching only the few hundred nearby points makes that free.
-    """
-
-    CELL = 0.25
-
-    def __init__(self, pts: np.ndarray) -> None:
-        self.pts = pts
-        if len(pts) == 0:
-            self.ox = self.oz = 0.0
-            self.cols = 1
-            self.starts = self.counts = np.zeros(0, dtype=np.int64)
-            self.slot: dict[int, int] = {}
-            return
-        self.ox = float(pts[:, 0].min())
-        self.oz = float(pts[:, 2].min())
-        ii = ((pts[:, 0] - self.ox) / self.CELL).astype(np.int64)
-        jj = ((pts[:, 2] - self.oz) / self.CELL).astype(np.int64)
-        self.cols = int(ii.max()) + 2
-        key = jj * self.cols + ii
-        order = np.argsort(key, kind="stable")
-        self.pts = pts[order]
-        uniq, starts, counts = np.unique(key[order], return_index=True, return_counts=True)
-        self.starts = starts.astype(np.int64)
-        self.counts = counts.astype(np.int64)
-        self.slot = {int(k): i for i, k in enumerate(uniq)}
-
-    def query(self, x: float, z: float, radius: float) -> np.ndarray:
-        """All points whose XZ position lies inside the given disc."""
-        if len(self.pts) == 0:
-            return self.pts
-        ci = int((x - self.ox) // self.CELL)
-        cj = int((z - self.oz) // self.CELL)
-        span = max(1, int(math.ceil(radius / self.CELL)))
-        chunks = []
-        for j in range(cj - span, cj + span + 1):
-            for i in range(ci - span, ci + span + 1):
-                slot = self.slot.get(j * self.cols + i) if j >= 0 and i >= 0 else None
-                if slot is None:
-                    continue
-                s = int(self.starts[slot])
-                chunks.append(self.pts[s:s + int(self.counts[slot])])
-        if not chunks:
-            return self.pts[:0]
-        near = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
-        d2 = (near[:, 0] - x) ** 2 + (near[:, 2] - z) ** 2
-        return near[d2 <= radius * radius]
-
