@@ -18,6 +18,16 @@ extension PetController {
         onPictureWorldChanged?()
     }
 
+    /// Enters Picture-World Mode 2 with an empty transparent background (0 scene VRAM)
+    /// so the user can observe ARDY free-roaming actions on a transparent desktop floor.
+    func loadEmptyTransparentPictureWorld() {
+        sceneActionController.reset()
+        pictureWorldRenderer.loadEmptyTransparentRoom()
+        applyPictureWorldRootTransform()
+        settleSpringBonePhysics(warmupSteps: 12)
+        onPictureWorldChanged?()
+    }
+
     func exitPictureWorld() {
         guard pictureWorldRenderer.isActive else { return }
         sceneActionController.standUpOrCancel(on: self, stopArdy: false)

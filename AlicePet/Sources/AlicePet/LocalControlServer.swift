@@ -170,6 +170,9 @@ final class LocalControlServer {
         case ("POST", "/ardy"):
             return handleArdy(controller: controller, json: json)
 
+        case ("POST", "/vrma"):
+            return handleVRMA(controller: controller, json: json)
+
         case ("POST", "/scene/load"):
             return handleSceneLoad(controller: controller, json: json)
 
@@ -219,7 +222,10 @@ final class LocalControlServer {
         return [
             "ok": true,
             "isPictureWorldActive": controller.isPictureWorldActive,
+            "isTransparentBackground": controller.pictureWorldRenderer.isEmptyTransparentMode,
             "poseMode": controller.poseMode.rawValue,
+            "activeVRMA": controller.activeVRMAName ?? "",
+            "speechGesturesEnabled": controller.animationMixer.speechGestureLayer.enabled,
             "sceneName": controller.pictureWorldRenderer.config?.name ?? "",
             "sceneFolder": controller.pictureWorldRenderer.sceneFolderURL?.path ?? "",
             "sceneState": stateDict,
@@ -313,9 +319,37 @@ final class LocalControlServer {
         return (started ? 200 : 500, ["ok": started, "ardyActive": started, "prompt": controller.localArdyService.currentPrompt], "ardy=\(action) ok=\(started)")
     }
 
+    private func handleVRMA(controller: PetController, json: [String: Any]) -> (Int, [String: Any], String) {
+        let action = (json["action"] as? String)?.lowercased() ?? "play"
+        if action == "stop" {
+            controller.stopVRMA()
+            appDelegate?.updateStatusBarTitle()
+            appDelegate?.refreshMenus()
+            return (200, ["ok": true, "vrmaActive": false], "vrma=stop")
+        }
+        guard let path = json["path"] as? String, !path.isEmpty else {
+            return (400, ["ok": false, "error": "Missing .vrma path"], "missing_vrma_path")
+        }
+        let loop = (json["loop"] as? Bool) ?? false
+        let speed = (json["speed"] as? NSNumber)?.floatValue ?? 1.0
+        do {
+            _ = try controller.playVRMA(from: URL(fileURLWithPath: path), loop: loop, speed: speed)
+            appDelegate?.updateStatusBarTitle()
+            appDelegate?.refreshMenus()
+            return (200, ["ok": true, "vrmaActive": true, "clip": controller.activeVRMAName ?? ""], "vrma=play clip=\(controller.activeVRMAName ?? "")")
+        } catch {
+            return (400, ["ok": false, "error": error.localizedDescription], "vrma_failed")
+        }
+    }
+
     private func handleSceneLoad(controller: PetController, json: [String: Any]) -> (Int, [String: Any], String) {
         guard let target = json["scene"] as? String, !target.isEmpty else {
             return (400, ["ok": false, "error": "Missing scene"], "missing_scene")
+        }
+        let lower = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower == "empty" || lower == "transparent" || lower == "empty_transparent" {
+            controller.loadEmptyTransparentPictureWorld()
+            return (200, buildStatePayload(controller: controller), "loaded=empty_transparent")
         }
         let candidateURL: URL
         if target.hasPrefix("/") {

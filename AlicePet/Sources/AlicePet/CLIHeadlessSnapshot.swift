@@ -75,6 +75,36 @@ func runHeadlessSnapshot(modelURL: URL, outputPath: String) -> Never {
             }
         }
 
+        if let emoName = parseCLIArg("--emotion") {
+            let intensity = Float(parseCLIArg("--emotion-strength") ?? "0.85") ?? 0.85
+            controller.emotionStateMachine.applyImpulse(emotion: emoName, intensity: intensity)
+            if parseCLIArg("--expression") == nil {
+                controller.setPresetMood(controller.emotionStateMachine.recommendedVRMExpression)
+            }
+        }
+        let testSpeechGesture = CommandLine.arguments.contains("--test-speech-gesture")
+        if testSpeechGesture {
+            controller.animationMixer.speechGestureLayer.debugSpeechEnergyOverride = 0.82
+        }
+
+        if let vrmaPath = parseCLIArg("--vrma"), let model = controller.model {
+            let vrmaURL = URL(fileURLWithPath: vrmaPath)
+            _ = try controller.playVRMA(from: vrmaURL, loop: true)
+            let seekTime = Float(parseCLIArg("--vrma-time") ?? "0.6") ?? 0.6
+            controller.poseController.applyBasePose(to: model, restTransforms: controller.poseController.restNodeTransforms)
+            controller.animationMixer.vrmaPlayer.seekAndApply(time: seekTime, model: model, renderer: controller.renderer)
+            model.updateNodeTransforms()
+            controller.settleSpringBonePhysics(warmupSteps: 20)
+        } else if testSpeechGesture || parseCLIArg("--emotion") != nil, let model = controller.model {
+            controller.animationMixer.evaluate(
+                model: model, renderer: controller.renderer, poseController: controller.poseController,
+                recipeStore: controller.recipeStore, expressionMixer: controller.expressionMixer,
+                emotionStateMachine: controller.emotionStateMachine,
+                elapsed: 1.2, dt: 0.0, idleBreathingEnabled: true, poseMode: controller.poseMode, window: nil
+            )
+            controller.settleSpringBonePhysics(warmupSteps: 16)
+        }
+
         if let sceneDir = parseCLIArg("--scene") {
             if try await applyPictureWorldCLIOptions(
                 controller: controller,
@@ -99,7 +129,8 @@ func runHeadlessSnapshot(modelURL: URL, outputPath: String) -> Never {
             snapH = max(240, Int((Double(cfg.imageHeight) * scale).rounded()))
         }
 
-        try await controller.renderSnapshot(to: URL(fileURLWithPath: outputPath), width: snapW, height: snapH)
+        let skipBase = (parseCLIArg("--vrma") != nil) || testSpeechGesture || (parseCLIArg("--emotion") != nil)
+        try await controller.renderSnapshot(to: URL(fileURLWithPath: outputPath), width: snapW, height: snapH, applyBaseState: !skipBase)
         print("Snapshot saved to \(outputPath)")
     }
 }
@@ -111,7 +142,12 @@ private func applyPictureWorldCLIOptions(
     sceneDir: String,
     outputPath: String
 ) async throws -> Bool {
-    try controller.loadPictureWorld(from: URL(fileURLWithPath: sceneDir))
+    let lowerScene = sceneDir.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if lowerScene == "empty" || lowerScene == "transparent" || lowerScene == "empty_transparent" {
+        controller.loadEmptyTransparentPictureWorld()
+    } else {
+        try controller.loadPictureWorld(from: URL(fileURLWithPath: sceneDir))
+    }
     if let posRaw = parseCLIArg("--avatar-pos") {
         let parts = posRaw.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
         if parts.count == 2 {

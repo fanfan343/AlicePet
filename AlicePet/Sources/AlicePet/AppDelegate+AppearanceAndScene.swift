@@ -148,6 +148,36 @@ extension AppDelegate {
         refreshMenus()
     }
 
+    @objc func toggleSpeechGestures() {
+        controller.animationMixer.speechGestureLayer.enabled.toggle()
+        refreshMenus()
+    }
+
+    @objc func openVRMAPanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "vrma") ?? .data, .data]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.prompt = "播放 .vrma 动作"
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                _ = try controller.playVRMA(from: url, loop: true)
+                refreshMenus()
+            } catch {
+                AppLogger.shared.error("VRMA", "Failed to play VRMA '\(url.lastPathComponent)': \(error)")
+            }
+        }
+    }
+
+    @objc func stopVRMAPlayback() {
+        controller.stopVRMA()
+        refreshMenus()
+    }
+
+    @objc func enterEmptyTransparentPictureWorld() {
+        controller.loadEmptyTransparentPictureWorld()
+    }
+
     @objc func selectCameraViewPreset(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String,
               let preset = CameraViewPreset(rawValue: raw) else { return }

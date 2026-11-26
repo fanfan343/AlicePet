@@ -97,6 +97,26 @@ extension PetController {
         animationMixer.ardyChannel.stop()
     }
 
+    var isVRMAActive: Bool { animationMixer.vrmaPlayer.isActive }
+    var activeVRMAName: String? { animationMixer.vrmaPlayer.activeClipName }
+
+    @discardableResult
+    func playVRMA(from url: URL, loop: Bool = false, speed: Float = 1.0) throws -> Bool {
+        guard let model else {
+            throw NSError(domain: "AlicePet.VRMA", code: 1, userInfo: [NSLocalizedDescriptionKey: "No VRM model loaded"])
+        }
+        animationMixer.preferredFullBodySource = .vrma
+        try animationMixer.vrmaPlayer.loadAndPlay(url: url, model: model, loop: loop, speed: speed)
+        return true
+    }
+
+    func stopVRMA() {
+        animationMixer.vrmaPlayer.stop(expressionMixer: expressionMixer, renderer: renderer)
+        if animationMixer.preferredFullBodySource == .vrma {
+            animationMixer.preferredFullBodySource = nil
+        }
+    }
+
     func stopAllTrackingSync() {
         localMotionService.stopSync()
         localAudioFaceService.stopSync()
@@ -143,15 +163,16 @@ extension PetController {
             throw NSError(domain: "AlicePet", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate offscreen textures"])
         }
 
+        let hasOpaqueBG = pictureWorldRenderer.hasOpaqueBackground
         let aspect = Float(width) / Float(height)
         let rpd = MTLRenderPassDescriptor()
         rpd.colorAttachments[0].texture = colorTex
-        rpd.colorAttachments[0].loadAction = pictureWorldRenderer.isActive ? .load : .clear
+        rpd.colorAttachments[0].loadAction = hasOpaqueBG ? .load : .clear
         rpd.colorAttachments[0].storeAction = .store
         rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
 
         rpd.depthAttachment.texture = depthTex
-        rpd.depthAttachment.loadAction = pictureWorldRenderer.isActive ? .load : .clear
+        rpd.depthAttachment.loadAction = hasOpaqueBG ? .load : .clear
         rpd.depthAttachment.storeAction = propRenderer.hasActiveProps ? .store : .dontCare
         rpd.depthAttachment.clearDepth = 1.0
 
@@ -167,7 +188,7 @@ extension PetController {
             throw NSError(domain: "AlicePet", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create command buffer"])
         }
 
-        if pictureWorldRenderer.isActive {
+        if hasOpaqueBG {
             pictureWorldRenderer.encodePrepass(
                 commandBuffer: commandBuffer,
                 colorTexture: colorTex,

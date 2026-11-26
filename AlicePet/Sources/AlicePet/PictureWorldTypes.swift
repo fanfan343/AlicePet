@@ -51,6 +51,33 @@ struct PictureWorldSceneConfig: Codable {
     var nearZ: Float { nearClip ?? 0.05 }
     var farZ: Float { farClip ?? 50.0 }
 
+    /// Synthetic Picture-World room config with no 2D background image (transparent desktop backdrop)
+    /// so the user can observe ARDY free-roaming locomotion & gestures on an empty transparent floor.
+    static func emptyTransparentRoom() -> PictureWorldSceneConfig {
+        PictureWorldSceneConfig(
+            version: 1,
+            name: "空透明房间",
+            imageWidth: 820,
+            imageHeight: 520,
+            depthWidth: 1,
+            depthHeight: 1,
+            fovYDegrees: 40.0,
+            cameraPosition: [0.0, 1.05, 2.35],
+            cameraTarget: [0.0, 0.78, 0.0],
+            cameraUp: [0.0, 1.0, 0.0],
+            avatarSpawnPosition: [0.0, 0.0, 0.0],
+            avatarSpawnYawRad: 0.0,
+            avatarScale: 1.0,
+            walkBoundsMin: [-1.45, -1.20],
+            walkBoundsMax: [1.45, 1.05],
+            nearClip: 0.05,
+            farClip: 50.0,
+            lightingPreset: nil,
+            anchors: [],
+            walkableGrid: nil
+        )
+    }
+
     private func vec3(_ arr: [Float], fallback: SIMD3<Float>) -> SIMD3<Float> {
         guard arr.count == 3 else { return fallback }
         return SIMD3<Float>(arr[0], arr[1], arr[2])

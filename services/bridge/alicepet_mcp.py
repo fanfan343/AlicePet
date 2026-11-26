@@ -143,12 +143,33 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "load_scene",
-        "description": "Enter a Picture-World room by folder name (e.g. 'demo_room') or pass 'exit' to return to transparent desktop pet mode.",
+        "name": "play_vrma",
+        "description": (
+            "Play or stop a standard .vrma (VRMC_vrm_animation) animation clip on Alice. "
+            "Automatically SLERP-crossfades in and back to idle pose when a one-shot clip ends."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "scene": {"type": "string", "description": "Room folder name, absolute path, or 'exit'."},
+                "action": {"type": "string", "enum": ["play", "stop"], "description": "Default 'play'."},
+                "path": {"type": "string", "description": "Absolute path to a .vrma file (required when action='play')."},
+                "loop": {"type": "boolean", "description": "Whether to loop the clip (default false)."},
+                "speed": {"type": "number", "minimum": 0.2, "maximum": 3.0, "description": "Playback speed multiplier (default 1.0)."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "load_scene",
+        "description": (
+            "Enter a Picture-World room by folder name (e.g. 'demo_room'), pass 'empty' for the "
+            "empty transparent room (observe ARDY free-roaming on transparent backdrop), or pass "
+            "'exit' to return to transparent desktop pet mode."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scene": {"type": "string", "description": "Room folder name, absolute path, 'empty', or 'exit'."},
             },
             "required": ["scene"],
             "additionalProperties": False,
@@ -202,6 +223,8 @@ def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
         res = http_json("POST", "/look", args)
     elif name == "ardy_action":
         res = http_json("POST", "/ardy", args)
+    elif name == "play_vrma":
+        res = http_json("POST", "/vrma", args)
     elif name == "walk_and_sit":
         res = http_json("POST", "/scene/walk-sit", {"anchorId": args.get("anchor_id", "")})
     elif name == "stand_up":

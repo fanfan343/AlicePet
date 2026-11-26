@@ -37,6 +37,8 @@ final class PictureWorldRenderer {
 
     private(set) var config: PictureWorldSceneConfig?
     private(set) var sceneFolderURL: URL?
+    /// True when Picture-World is running in empty transparent backdrop mode (no 2D photo/depth map).
+    private(set) var isEmptyTransparentMode: Bool = false
     /// Parsed walkable floor grid for the active scene (nil for hand-authored scenes without one).
     private(set) var roomGrid: WalkableGrid.ParsedGrid?
     private var bgTexture: MTLTexture?
@@ -59,7 +61,11 @@ final class PictureWorldRenderer {
     var lastIsNearBoundary: Bool = false
 
     var isActive: Bool {
-        config != nil && bgTexture != nil && depthTexture != nil
+        config != nil && (isEmptyTransparentMode || (bgTexture != nil && depthTexture != nil))
+    }
+
+    var hasOpaqueBackground: Bool {
+        config != nil && !isEmptyTransparentMode && bgTexture != nil && depthTexture != nil
     }
 
     init(device: MTLDevice, colorFormat: MTLPixelFormat = .bgra8Unorm, depthFormat: MTLPixelFormat = .depth32Float, sampleCount: Int = 4) throws {
@@ -126,6 +132,7 @@ final class PictureWorldRenderer {
 
         self.config = cfg
         self.sceneFolderURL = folderURL
+        self.isEmptyTransparentMode = false
         self.roomGrid = cfg.walkableGrid.map { WalkableGrid.ParsedGrid(grid: $0) }
         self.bgTexture = bgTex
         self.depthTexture = depthTex
@@ -144,9 +151,31 @@ final class PictureWorldRenderer {
         )
     }
 
+    /// Activates Picture-World Mode 2 without a 2D image background (transparent desktop backdrop)
+    /// so the user can observe ARDY free-roaming locomotion & gestures on an empty floor.
+    func loadEmptyTransparentRoom() {
+        let cfg = PictureWorldSceneConfig.emptyTransparentRoom()
+        self.config = cfg
+        self.sceneFolderURL = nil
+        self.isEmptyTransparentMode = true
+        self.roomGrid = nil
+        self.bgTexture = nil
+        self.depthTexture = nil
+        self.depthMeters.removeAll(keepingCapacity: false)
+        self.avatarWorldPosition = cfg.spawnPos
+        self.avatarWorldYaw = cfg.avatarSpawnYawRad
+        self.canvasZoom = 1.0
+        self.canvasPanUV = .zero
+        self.lastARDYRootXZ = nil
+        self.lastBoundaryContacts = []
+        self.lastIsNearBoundary = false
+        AppLogger.shared.info("PictureWorld", "Entered empty transparent Picture-World room (0 scene VRAM)")
+    }
+
     func unloadScene() {
         config = nil
         sceneFolderURL = nil
+        isEmptyTransparentMode = false
         roomGrid = nil
         bgTexture = nil
         depthTexture = nil

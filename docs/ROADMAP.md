@@ -26,9 +26,10 @@
 
 ---
 
-## Stage 6：表现力深化与语音闭环（下一阶段）
-- [ ] **标准 `.vrma` 动画加载播放** + **说话手势节拍**（在 Layer 1 头部微动之上补上程序化手臂/手势节拍与情绪微体态）
-- [ ] **画中模式空透明房间模式**（背景可设为空，便于纯透明底观察 ARDY 自由动作）
+## Stage 6：表现力深化与语音闭环（进行中）
+- [x] **标准 `.vrma` 动画加载播放** + **说话手势节拍与情绪体态**：复用 `VRMMetalKit` 原生 `VRMAnimationLoader`/`AnimationPlayer`（Layer 0 + 0.35s SLERP + `play_vrma` MCP/菜单/HTTP 控制），并在 Layer 1 补齐程序化说话手臂/手腕节拍与情绪微体态（`SpeechGestureLayer`）
+- [x] **画中模式空透明房间模式**：背景可设为纯透明（0 场景显存、`820×520` 无边框透明窗），可在空房间内观察 ARDY 自由行走与动作（菜单 / `--scene empty` / `load_scene("empty")`）
+- [x] **VLM 视觉识座 + 自主走去坐下端到端验收**：在无预设锚点的二次元客厅中，ZeroClaw + VLM 通过 `observe_scene` → `register_anchors(u, v)` → `walk_and_sit` 自主完成识座、MoGe-2 深度反投影（`seatHeight≈0.47m`）并走到沙发落座
 - [ ] **本地语音通话闭环**：`SenseVoice-Small` / `Parakeet` STT + Pipecat `Smart Turn` 语义断句 + `Pocket TTS` / 在线 TTS → Audio2Face-3D 实时口型
 - [ ] **动态帧率省电策略**（互动 60fps / 静止待机 24–30fps）与更多通用 VRM 模型适配
 - [ ] **远期灵感池**：Mode 3 原生对话窗、Mode 4 状态栏小工具、XR Animator 画中互动、参考 Folia 的后台音乐状态联动动画

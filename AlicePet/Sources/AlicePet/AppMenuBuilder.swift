@@ -52,6 +52,11 @@ extension AppDelegate {
             action: #selector(exitPictureWorldMode),
             isOn: !controller.isPictureWorldActive
         ))
+        sceneMenu.addItem(makeToggleItem(
+            "画中模式 · 空透明房间（观察 ARDY 自由动作）",
+            action: #selector(enterEmptyTransparentPictureWorld),
+            isOn: controller.pictureWorldRenderer.isEmptyTransparentMode
+        ))
 
         let discoveredScenes = discoverPictureWorldScenes()
         if !discoveredScenes.isEmpty {
@@ -214,6 +219,22 @@ extension AppDelegate {
         }
         rootMenu.addItem(makeSubmenuRoot("表情配方 (\(controller.recipeStore.availableFaceRecipes.count) 套)", submenu: exprMenu))
 
+        // 2d. Standard .vrma Animation Playback
+        rootMenu.addItem(.separator())
+        let playVRMAItem = NSMenuItem(title: "播放 .vrma 标准动画…", action: #selector(openVRMAPanel), keyEquivalent: "")
+        playVRMAItem.target = self
+        rootMenu.addItem(playVRMAItem)
+        if controller.isVRMAActive {
+            let stopVRMAItem = NSMenuItem(
+                title: "停止 .vrma 动画 (\(controller.activeVRMAName ?? "播放中"))",
+                action: #selector(stopVRMAPlayback),
+                keyEquivalent: ""
+            )
+            stopVRMAItem.target = self
+            stopVRMAItem.state = .on
+            rootMenu.addItem(stopVRMAItem)
+        }
+
         return makeSubmenuRoot("姿态与表情", submenu: rootMenu)
     }
 
@@ -300,6 +321,11 @@ extension AppDelegate {
         menu.addItem(makeToggleItem("SpringBone 物理", action: #selector(toggleSpringBone), isOn: controller.springBoneEnabled))
         menu.addItem(makeToggleItem("视线跟随鼠标", action: #selector(toggleEyeTracking), isOn: controller.eyeTrackingEnabled))
         menu.addItem(makeToggleItem("自动眨眼", action: #selector(toggleAutoBlink), isOn: controller.autoBlinkEnabled))
+        menu.addItem(makeToggleItem(
+            "说话手势节拍与情绪姿态",
+            action: #selector(toggleSpeechGestures),
+            isOn: controller.animationMixer.speechGestureLayer.enabled
+        ))
 
         return makeSubmenuRoot("视角与基础开关", submenu: menu)
     }

@@ -15,7 +15,7 @@ auto_approve = [
   "file_read", "file_write", "file_edit", "memory_recall", "memory_store",
   "glob_search", "content_search", "image_info",
   "alicepet__get_scene_state", "alicepet__observe_scene", "alicepet__set_look",
-  "alicepet__ardy_action", "alicepet__walk_and_sit", "alicepet__stand_up",
+  "alicepet__ardy_action", "alicepet__play_vrma", "alicepet__walk_and_sit", "alicepet__stand_up",
   "alicepet__load_scene", "alicepet__register_anchors",
 ]
 

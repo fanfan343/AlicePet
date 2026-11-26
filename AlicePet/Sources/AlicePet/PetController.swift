@@ -113,6 +113,7 @@ final class PetController: NSObject, MTKViewDelegate {
 
     private func bindServiceCallbacks() {
         animationMixer.onMixerStateChanged = { [weak self] in self?.onVMCStatusChanged?() }
+        animationMixer.vrmaPlayer.onStateChanged = { [weak self] in self?.onVMCStatusChanged?() }
         animationMixer.externalChannel.onStatusChanged = { [weak self] in self?.onVMCStatusChanged?() }
         animationMixer.externalChannel.onError = { [weak self] msg in
             self?.localMotionService.stop()
@@ -247,6 +248,7 @@ final class PetController: NSObject, MTKViewDelegate {
                 poseController: poseController,
                 recipeStore: recipeStore,
                 expressionMixer: expressionMixer,
+                emotionStateMachine: emotionStateMachine,
                 elapsed: elapsed,
                 dt: dt,
                 idleBreathingEnabled: idleBreathingEnabled,
@@ -271,7 +273,7 @@ final class PetController: NSObject, MTKViewDelegate {
             _ = refreshSceneState(aspect: aspect)
         }
 
-        if pictureWorldRenderer.isActive,
+        if pictureWorldRenderer.hasOpaqueBackground,
            let colorTex = descriptor.colorAttachments[0].texture,
            let depthTex = descriptor.depthAttachment.texture {
             pictureWorldRenderer.encodePrepass(

@@ -225,6 +225,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var badges: [String] = []
         if controller.localArdyActive {
             badges.append(controller.animationMixer.ardyChannel.hasFreshFrame ? "💃" : "💃(生成中)")
+        } else if controller.isVRMAActive {
+            badges.append("🎬")
         } else if controller.localMotionActive {
             badges.append(controller.vmcReceiving ? "🎭" : "🎭(启动中)")
         } else if controller.vmcActive {
@@ -243,14 +245,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func syncWindowForPictureWorld() {
         guard let window, let mtkView else { return }
         if controller.isPictureWorldActive {
-            let targetSize = NSSize(width: 820, height: 480)
+            let isTransparent = controller.pictureWorldRenderer.isEmptyTransparentMode
+            let targetSize = isTransparent ? NSSize(width: 820, height: 520) : NSSize(width: 820, height: 480)
             var frame = window.frame
             frame.origin.x -= (targetSize.width - frame.size.width) * 0.5
             frame.size = targetSize
             window.setFrame(frame, display: true, animate: true)
-            window.hasShadow = true
-            mtkView.layer?.cornerRadius = 14
-            mtkView.layer?.masksToBounds = true
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.hasShadow = !isTransparent
+            mtkView.layer?.cornerRadius = isTransparent ? 0 : 14
+            mtkView.layer?.masksToBounds = !isTransparent
         } else {
             let targetSize = NSSize(width: 460, height: 680)
             var frame = window.frame
