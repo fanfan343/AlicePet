@@ -3,6 +3,7 @@
 macOS（Apple Silicon）原生的超轻量 3D VRM 桌面伴侣，基于 **Swift + Metal + `VRMMetalKit`** 渲染，采用「原生极轻身体 + 进程外按需 AI 子服务 + ZeroClaw 大脑与 MCP 桥」解耦架构。
 
 > 架构设计见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · 详细路线图见 [docs/ROADMAP.md](docs/ROADMAP.md) · 协作规则见 [AGENTS.md](AGENTS.md)
+> 实时进度看板：[GitHub Projects v2](https://github.com/users/fanfan343/projects/1) · [Milestones](https://github.com/fanfan343/AlicePet/milestones) · [Issues](https://github.com/fanfan343/AlicePet/issues)
 
 ---
 
