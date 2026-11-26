@@ -2,6 +2,10 @@
 *.log
 logs/
 *.png
+!docs/assets/*.png
+!docs/assets/*.jpg
+!docs/assets/*.jpeg
+!docs/assets/*.webp
 *.mov
 *.wav
 

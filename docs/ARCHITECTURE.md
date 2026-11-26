@@ -9,7 +9,7 @@
 | 模式 | 形态与定位 | 用户交互边界 | 当前状态 |
 |---|---|---|---|
 | **Mode 1 · 普通桌宠模式** | 透明无边框置顶窗，陪伴挂机 | 用户可轨道旋转、平移、滚轮缩放、双击复位 | 已实现 |
-| **Mode 2 · 画中模式（Picture-World）** | 2D 插画/照片（或空透明房间）+ 硬件深度遮挡 + A* 避障；VRM 与房间场景交互 | **用户仅滚轮缩放、中键平移观察、双击复位**；一切主动移动/就座/动作均由 LLM 决策，空闲时由程序维持 | 已实现（空房间背景与 VRMA 后续补齐） |
+| **Mode 2 · 画中模式（Picture-World）** | 2D 插画/照片（或空透明房间）+ 硬件深度遮挡 + A* 避障；VRM 与房间场景交互 | **用户仅滚轮缩放、中键平移观察、双击复位**；一切主动移动/就座/动作均由 LLM 决策，空闲时由程序维持 | 已实现（含空透明房间、`.vrma` 与 VLM 识座落座） |
 | **Mode 3 · 原生对话 UI** | Apple 原生独立 Chat 窗口（非 WebView） | 传统图文/语音对话界面 | 预留位置，暂不做 |
 | **Mode 4 · 纯状态栏模式** | 无桌面窗口，仅 macOS 顶部状态栏图标 | 后续可挂载快捷小工具（Alice 的 Todo、剪贴板、AI 套餐额度、系统状态等） | 预留位置，后续扩展 |
 
@@ -73,5 +73,6 @@
 - `POST /observe` — 截取当前实时画面 PNG，返回实时图路径、房间原图 `bg.png` 路径与状态摘要（供 VLM 视觉观察）
 - `POST /look` — 设置姿态 / 手势 / 表情 / 换装 / 注入情绪脉冲
 - `POST /ardy` — 启动、下发实时动作提示词或停止 ARDY 20fps 全身动作
-- `POST /scene/walk-sit` / `POST /scene/stand-up` / `POST /scene/load` / `POST /scene/exit` — 房间切换与自主走动就座
+- `POST /vrma` — 加载播放或停止标准 `.vrma`（`VRMC_vrm_animation`）动画片段
+- `POST /scene/walk-sit` / `POST /scene/stand-up` / `POST /scene/load`（支持 `"empty"` 空透明房间）/ `POST /scene/exit` — 房间切换与自主走动就座
 - `POST /scene/anchors` — 接收 VLM 视觉定位的 2D 归一化坐标 `(u, v)` + 标签 + 朝向，由 App 通过 `depth.bin` 反投影为 3D 锚点并保存进 `scene.json`
