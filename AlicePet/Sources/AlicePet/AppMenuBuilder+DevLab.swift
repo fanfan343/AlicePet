@@ -37,6 +37,14 @@ extension AppDelegate {
         labInfoItem.isEnabled = false
         labMenu.addItem(labInfoItem)
 
+        let emo = controller.emotionStateMachine.snapshot()
+        let ctrlStatus = controlServer.isRunning
+            ? "控制桥：127.0.0.1:\(controlServer.port) · 情绪=\(emo.dominantEmotion)(\(String(format: "%.2f", emo.dominantIntensity)))"
+            : "控制桥：未启动"
+        let ctrlInfoItem = NSMenuItem(title: ctrlStatus, action: nil, keyEquivalent: "")
+        ctrlInfoItem.isEnabled = false
+        labMenu.addItem(ctrlInfoItem)
+
         let logItem = NSMenuItem(title: "打开日志文件夹", action: #selector(openLogFolder), keyEquivalent: "l")
         logItem.target = self
         labMenu.addItem(logItem)

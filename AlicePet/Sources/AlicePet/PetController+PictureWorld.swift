@@ -182,4 +182,68 @@ extension PetController {
         }
         model.updateNodeTransforms()
     }
+
+    struct UVAnchorSpec {
+        let id: String
+        let label: String
+        let kind: String
+        let u: Float
+        let v: Float
+        let facingYawDeg: Float?
+    }
+
+    /// Unprojects VLM-provided 2D normalized image coordinates `(u, v)` into 3D scene anchors
+    /// using the active MoGe-2 depth map, snaps approach positions onto `walkableGrid`, writes
+    /// them into `scene.json`, and reloads the scene anchors in place.
+    func registerSceneAnchorsFromUV(_ specs: [UVAnchorSpec]) throws -> [SceneAnchor] {
+        guard let folder = pictureWorldRenderer.sceneFolderURL,
+              let cfg = pictureWorldRenderer.config else {
+            throw NSError(domain: "AlicePet.PictureWorld", code: 30, userInfo: [NSLocalizedDescriptionKey: "No active Picture-World scene"])
+        }
+        var built: [SceneAnchor] = []
+        for spec in specs {
+            guard let worldPt = pictureWorldRenderer.unprojectImageUV(u: spec.u, v: spec.v) else { continue }
+            let groundY = pictureWorldRenderer.groundHeight(atX: worldPt.x, z: worldPt.z)
+            let relH = min(max(worldPt.y - groundY, 0.32), 0.62)
+            let facingYaw: Float = {
+                if let deg = spec.facingYawDeg { return deg * .pi / 180.0 }
+                // Default: face toward the camera/room center so Alice looks into the room
+                let dx = cfg.camPos.x - worldPt.x
+                let dz = cfg.camPos.z - worldPt.z
+                return atan2(dx, dz)
+            }()
+            let fwd = SIMD2<Float>(sin(facingYaw), cos(facingYaw))
+            let rawApproach = SIMD2<Float>(worldPt.x + fwd.x * 0.55, worldPt.z + fwd.y * 0.55)
+            let approachXZ = pictureWorldRenderer.roomGrid?.nearestWalkable(x: rawApproach.x, z: rawApproach.y, maxRadius: 20)
+                ?? rawApproach
+            let approachGroundY = pictureWorldRenderer.groundHeight(atX: approachXZ.x, z: approachXZ.y)
+
+            built.append(SceneAnchor(
+                id: spec.id,
+                label: spec.label,
+                kind: spec.kind,
+                approachPosition: [approachXZ.x, approachGroundY, approachXZ.y],
+                targetPosition: [worldPt.x, groundY + relH, worldPt.z],
+                seatHeight: spec.kind == "seat" ? (groundY + relH) : nil,
+                facingYawRad: facingYaw
+            ))
+        }
+        guard !built.isEmpty else {
+            throw NSError(domain: "AlicePet.PictureWorld", code: 31, userInfo: [NSLocalizedDescriptionKey: "No valid 3D points could be unprojected from UVs"])
+        }
+
+        let jsonURL = folder.appendingPathComponent("scene.json")
+        let data = try Data(contentsOf: jsonURL)
+        guard var rootObj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(domain: "AlicePet.PictureWorld", code: 32, userInfo: [NSLocalizedDescriptionKey: "Invalid scene.json format"])
+        }
+        let encodedAnchors = try JSONEncoder().encode(built)
+        rootObj["anchors"] = try JSONSerialization.jsonObject(with: encodedAnchors)
+        let outData = try JSONSerialization.data(withJSONObject: rootObj, options: [.prettyPrinted, .sortedKeys])
+        try outData.write(to: jsonURL, options: .atomic)
+
+        try pictureWorldRenderer.loadScene(from: folder)
+        AppLogger.shared.info("PictureWorld", "Registered \(built.count) VLM UV anchor(s) into \(jsonURL.lastPathComponent)")
+        return built
+    }
 }

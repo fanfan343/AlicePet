@@ -54,3 +54,8 @@ scenes/*/qc_*.png
 
 # Locally generated test rooms (regenerate with services/scene/estimate_scene.py)
 scenes/_test/
+
+# Personal daily episodic logs and local secrets
+soul/episodes/*.md
+.env
+.env.*

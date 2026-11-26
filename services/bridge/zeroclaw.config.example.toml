@@ -1,0 +1,68 @@
+# ZeroClaw 0.9.0 configuration template for AlicePet (copy to ~/.zeroclaw/config.toml and fill in api_key)
+schema_version = 4
+
+[secrets]
+encrypt = false
+
+[memory]
+backend = "sqlite"
+search_mode = "bm25"
+
+[risk_profiles.default]
+level = "supervised"
+allowed_roots = ["/Users/funnyliu/Downloads/VRM项目/soul"]
+auto_approve = [
+  "file_read", "file_write", "file_edit", "memory_recall", "memory_store",
+  "glob_search", "content_search", "image_info",
+  "alicepet__get_scene_state", "alicepet__observe_scene", "alicepet__set_look",
+  "alicepet__ardy_action", "alicepet__walk_and_sit", "alicepet__stand_up",
+  "alicepet__load_scene", "alicepet__register_anchors",
+]
+
+[providers.models.opencode.go]
+uri = "https://opencode.ai/inference/go/openai/v1"
+# Note: On ZeroClaw 0.9.0 + OpenCode Go, OpenAI-native multimodal models (e.g. deepseek-v4.1-flash,
+# kimi-k2.7-code, mimo-v2.6-pro) work out-of-the-box with tools + vision.
+model = "deepseek-v4.1-flash"
+api_key = "REPLACE_WITH_OPENCODE_GO_API_KEY"
+extra_headers = { "x-opencode-session" = "ses_alicepet_main" }
+cache_passthrough = true
+vision = true
+tool_result_image_policy = "relocate"
+temperature = 0.7
+
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "alicepet"
+transport = "stdio"
+command = "/usr/bin/python3"
+args = ["/Users/funnyliu/Downloads/VRM项目/services/bridge/alicepet_mcp.py"]
+tool_timeout_secs = 30
+
+[mcp_bundles.alicepet]
+servers = ["alicepet"]
+
+[agents.alice]
+enabled = true
+model_provider = "opencode.go"
+risk_profile = "default"
+mcp_bundles = ["alicepet"]
+acp_enable_mcp = true
+
+[agents.alice.workspace]
+path = "/Users/funnyliu/Downloads/VRM项目/soul"
+
+[agents.alice.memory]
+backend = "sqlite"
+
+[heartbeat]
+enabled = true
+agent = "alice"
+interval_minutes = 30
+load_session_context = true
+message = "轻量自主心跳：调用 get_scene_state 查看自己当前位置、遮挡与情绪，阅读 TODO.md 与今日 episodes/，按心情决定是否更新情绪/姿态/走去坐下，或把今日流水账折叠整理进 MEMORIES.md。"
+
+[gateway]
+host = "127.0.0.1"

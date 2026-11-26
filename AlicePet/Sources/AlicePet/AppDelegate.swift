@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var lipSyncTuningPanel: AudioLipSyncTuningPanel?
     var ardyLabPanel: ArdyLabPanel?
+    let controlServer = LocalControlServer()
 
     var isClickThrough: Bool = false
     /// True while the scene service is analysing an image, so the menu can say so.
@@ -64,6 +65,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bindControllerCallbacks()
         setupStatusBar()
         controller.startTimers()
+        let controlPort = UInt16(ProcessInfo.processInfo.environment["ALICEPET_CONTROL_PORT"] ?? "") ?? LocalControlServer.defaultPort
+        controlServer.start(port: controlPort, controller: controller, appDelegate: self)
 
         Task { @MainActor in
             do {
@@ -261,10 +264,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        controlServer.stop()
         controller?.stopAllTrackingSync()
     }
 
     @objc func quitApp() {
+        controlServer.stop()
         controller.stopAllTrackingSync()
         NSApp.terminate(nil)
     }

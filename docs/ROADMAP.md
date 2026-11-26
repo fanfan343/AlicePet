@@ -1,37 +1,34 @@
 # AlicePet 路线图（ROADMAP）
 
-原则：**一步一步推进，先打牢渲染与通用模型适配，再逐步叠动作流、面捕与 AI 交互。**
+原则：**原生极轻、大脑与身体解耦、先验主线闭环再逐项打磨。** 详细架构见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
 
-## Stage 1：工程护栏与基础闭环（当前进行中）
-- [x] macOS 透明无边框置顶窗 + `VRMMetalKit` 4× MSAA 渲染
-- [x] 基础交互（拖窗、轨道旋转、平移、缩放、菜单栏控制）
-- [x] Mac / iPhone 连续互通相机面捕 + 1€ 自适应滤波
-- [x] GLTF 独立道具叠加、AFK 姿态、手势、换装与日志系统
-- [x] 建立项目 `AGENTS.md`、规范预留目录、一键视觉回归脚本与 `release` 构建
-- [x] 轻量级性能采样日志（FPS / 帧耗时 / 内存基线）
+## 四种形态规划
+- **Mode 1 · 普通桌宠模式**：透明置顶陪伴，用户可交互视角（已实现）
+- **Mode 2 · 画中模式**：2D 插画/照片（及空透明房间）+ 硬件深度遮挡 + A* 避障，用户仅缩放/中键观察，动作由 LLM 自主驱动（已实现核心，持续补齐空房间与 VLM 锚点）
+- **Mode 3 · 原生对话 UI**：Apple 原生独立对话窗（预留位置，暂不实现）
+- **Mode 4 · 纯状态栏模式**：无窗口仅顶部状态栏图标，后续可挂 Todo/剪贴板/额度/系统状态小工具（预留位置）
 
-## Stage 2：架构拆薄与渲染打磨（进行中）
-- [x] 将 `PetController.swift` 拆分为独立模块：骨骼姿态（`PoseController` + `MotionSource` 协议）、表情分层（`ExpressionMixer`）、模型适配（`ModelProfile`）
-- [x] 把 Alice 专属节点/换装/发型/道具偏移外置到 `profiles/alice.json`，主程序支持通用 VRM 降级
-- [x] 修复切姿态 SpringBone 炸毛/发箍飞起（`resetPhysics` + `warmupPhysics`）、表情菜单勾选态、换装菜单动态检测、记住上次加载的模型路径
-- [x] 打磨 MToon 赛璐璐光影（4 套预设 + 描边可选 + 恢复作者原色/自发光）、道具多灯均衡补光、消除 AFK 裙摆穿模
-- [ ] 动态帧率省电策略（互动 60fps / 静止待机 24–30fps / 被遮挡降频或休眠）
-- [ ] 接入 1–2 个非 Alice 的通用 VRM 模型验证跨模型兼容性
+---
 
-## Stage 3：动作系统深化（分层混合器 + ARDY Mini）
-- [x] 定义统一的 `MotionSource` 协议，并实现原版 Unity Humanoid 肌肉动画提取器（`tools/extract_alice_animations.py`）与实时重定向播放器（`UnityMuscleRetargeter` + `AuthorAnimationPlayer`），还原作者原版 Stand / Sit / Crouch / Prone / 16.67s AFK 循环动作
-- [x] 实现三层动画混合器 `AnimationMixer`（独立 VMC 通道隔离 + Layer 0 全身 0.35s SLERP Crossfade 过渡 + Layer 1 语音头部微动四元数叠加 + Layer 2 下脸口型 / 上脸情绪 / 视线与眨眼三轨解耦）
-- [x] 在「测试功能 (Lab)」中以独立本地子服务方式接入 **ARDY Mini**（`services/ardy/`，文本驱动 20fps 自回归全身动作）与通用双臂比例 2-Bone IK / 防穿模保护
-- [x] 接入 **NVIDIA Audio2Face-3D v2.3.1 Claire**（`services/tts/audio2face3d_vmc.py`，官方 ONNX + 52-D 缓存求解器，支持原生 10 维情绪与真实眉眼动态，并可在 Lab 面板与 LAM 切换对比）
-- [x] 实现轻量「画中世界（形态 B）」原生 Metal 渲染器（`PictureWorldRenderer` + `services/scene/` MoGe-2 单图深度与地平面重建，支持透明桌宠 ↔ 2D→3D 房间硬件深度遮挡一键切换）
-- [ ] 支持加载播放标准 `.vrma` 动画文件
+## Stage 1–4：身体、渲染、动捕与画中世界（已完成主线）
+- [x] macOS 原生 Swift + Metal + `VRMMetalKit` 4× MSAA 渲染、透明桌宠、换装/发型、独立道具与视觉回归闭环
+- [x] 三层动画混合器 `AnimationMixer`（原版 Unity 肌肉动画 + 0.35s SLERP + Layer 1 头部微动 + Layer 2 下脸/上脸/视线三轨解耦）
+- [x] 本地进程外子服务：ARDY Mini（20fps 文本动作 + 双臂 2-Bone IK）、Audio2Face-3D v2.3.1 Claire（10 维原生情绪 + 流式口型）、MediaPipe 精捕 + VMC/OSC
+- [x] 画中世界（Mode 2）：MoGe-2 原生深度 + RGB 轮廓贴边遮挡细化 + 地面二次曲面 + 2D 可走网格 + A* 避障走去坐下
 
-## Stage 4：面捕与上半身捕捉进阶
-- [x] VMC / OSC UDP 统一动捕接收器（默认端口 `39539` / `39540`，支持 52 通道 ARKit PerfectSync + 全身/十指骨骼，兼容外部发包端与本机服务）
-- [x] 本地无界面 MediaPipe 精捕子服务（`services/motion/`：直接复用 `face_landmarker` + `pose_landmarker` + `hand_landmarker` 3 个 `.task` 模型，输出 52 通道表情 + 上半身 + 十指，菜单栏一键启停、关闭即终止进程 100% 释放摄像头）
-- [x] 废弃旧版 Apple Vision 启发式摄像头捕捉与抖动体捕，统一收口到 VMC 管线与简洁菜单栏
+---
 
-## Stage 5：AI 大脑与语音口型（LLM + TTS）
-- [ ] 在 `services/llm/` 中接入可切换的在线 / 本地 LLM 对话服务
-- [ ] 在 `services/tts/` 中接入在线 / 本地 TTS 语音合成与实时音频 LipSync 口型驱动
-- [ ] 情绪标签自动联动表情配方、手势与待机姿态
+## Stage 5：Harness 大脑底座与「虚拟生命」闭环（已完成主线闭环）
+- [x] **控制桥与统一日志**：`LocalControlServer.swift`（Apple `Network.framework`）+ `services/bridge/alicepet_mcp.py`（标准 MCP，可复用到任意外部 Harness / 网关）
+- [x] **ZeroClaw 底座与两段式记忆**：接入 `ZeroClaw 0.9.0`（Rust <5MB）+ AnySoul 风格 Heartbeat / `TODO.md` + Animama 两段式 Markdown 记忆（`SOUL.md` / `PROFILE.md` / `MEMORIES.md` / `episodes/`）
+- [x] **连续情绪惯性状态机**：`EmotionStateMachine.swift`（8 组对立情绪惯性与自然衰减）
+- [x] **VLM 自主观察与 ARDY 联动验收**：LLM 主动看图观察房间、更新情绪与表情、触发 ARDY 20fps 动作并记录当日情景记忆
+
+---
+
+## Stage 6：表现力深化与语音闭环（下一阶段）
+- [ ] **标准 `.vrma` 动画加载播放** + **说话手势节拍**（在 Layer 1 头部微动之上补上程序化手臂/手势节拍与情绪微体态）
+- [ ] **画中模式空透明房间模式**（背景可设为空，便于纯透明底观察 ARDY 自由动作）
+- [ ] **本地语音通话闭环**：`SenseVoice-Small` / `Parakeet` STT + Pipecat `Smart Turn` 语义断句 + `Pocket TTS` / 在线 TTS → Audio2Face-3D 实时口型
+- [ ] **动态帧率省电策略**（互动 60fps / 静止待机 24–30fps）与更多通用 VRM 模型适配
+- [ ] **远期灵感池**：Mode 3 原生对话窗、Mode 4 状态栏小工具、XR Animator 画中互动、参考 Folia 的后台音乐状态联动动画

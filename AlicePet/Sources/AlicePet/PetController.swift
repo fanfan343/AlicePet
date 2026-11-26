@@ -18,6 +18,7 @@ final class PetController: NSObject, MTKViewDelegate {
     let recipeStore = AssetRecipeStore()
     let poseController = PoseController()
     let expressionMixer = ExpressionMixer()
+    let emotionStateMachine = EmotionStateMachine()
     let animationMixer = AnimationMixer()
     var vmcController: VMCTrackingController { animationMixer.externalChannel }
     let localMotionService = LocalMotionService()
@@ -237,6 +238,7 @@ final class PetController: NSObject, MTKViewDelegate {
 
         let dt = max(0.0, min(frameStart - lastFrameTime, 0.1))
         lastFrameTime = frameStart
+        emotionStateMachine.tick(dt: dt)
         let elapsed = Float(frameStart - startTime)
         if let model {
             animationMixer.evaluate(
