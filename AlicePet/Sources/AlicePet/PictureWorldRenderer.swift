@@ -299,6 +299,13 @@ final class PictureWorldRenderer {
         lastARDYRootXZ = nil
     }
 
+    /// World Y of the floor at a room position. Zero for hand-authored scenes without a
+    /// fitted ground surface; the analyser's quadratic otherwise, so Alice's feet follow the
+    /// real (slightly tilted, slightly curled) floor instead of floating at the far end.
+    func groundHeight(atX x: Float, z: Float) -> Float {
+        roomGrid?.groundHeight(x: x, z: z) ?? 0
+    }
+
     /// Integrates continuous ARDY root XZ displacement (meters) onto the Picture-World floor while
     /// enforcing BOTH the scene `walkBounds` and the unzoomed base camera-frustum visibility guard.
     /// When `goalTargetXZ` is supplied (goal-directed navigation), smoothly steers `avatarWorldYaw`

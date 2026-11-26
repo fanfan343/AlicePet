@@ -200,11 +200,15 @@ final class SceneActionController {
             let rawT = Float(min(nextElapsed / max(duration, 0.05), 1.0))
             let smoothT = rawT * rawT * (3.0 - 2.0 * rawT)
 
-            // Compute exact seated Y elevation so Alice's thighs rest directly on the MoGe-2 cushion height
+            // Seated Y elevation, so Alice's thighs rest on the measured cushion. Measured
+            // against the local floor rather than world Y=0, because the floor surface is
+            // fitted (and slightly curved) — the root transform adds that back.
             let seatYOffset: Float = {
                 guard let seatH = anchor.seatHeight else { return 0.0 }
-                // Author `sit` pose places seated thigh underside at ~0.42m above root Y=0
-                return min(max(seatH - 0.42, -0.15), 0.25)
+                let localGround = controller.pictureWorldRenderer.groundHeight(
+                    atX: anchor.targetPos.x, z: anchor.targetPos.z)
+                // Author `sit` pose places the seated thigh underside ~0.42 m above the root.
+                return min(max(seatH - localGround - 0.42, -0.15), 0.25)
             }()
             let finalSeatPos = SIMD3<Float>(anchor.targetPos.x, seatYOffset, anchor.targetPos.z)
             controller.pictureWorldRenderer.avatarWorldPosition = simd_mix(startPos, finalSeatPos, SIMD3<Float>(repeating: smoothT))

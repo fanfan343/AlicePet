@@ -12,6 +12,18 @@ struct WalkableGrid: Codable, Equatable, Sendable {
     let width: Int
     let height: Int
     let rows: [String]
+    /// Quadratic ground surface `[c0, cx, cz, cxx, cxz, czz]`, i.e.
+    /// `y = c0 + cx·x + cz·z + cxx·x² + cxz·x·z + czz·z²`.
+    ///
+    /// Depth from a drawn room drifts 15-30 cm across the floor, so a flat Y=0 plane would
+    /// leave Alice floating at one end and sunk at the other. The analyser fits this surface
+    /// to the visible floor, and everything the avatar stands on is lifted onto it.
+    let groundSurface: [Float]?
+
+    func groundHeight(x: Float, z: Float) -> Float {
+        guard let g = groundSurface, g.count == 6 else { return 0 }
+        return g[0] + g[1] * x + g[2] * z + g[3] * x * x + g[4] * x * z + g[5] * z * z
+    }
 
     private var cells: [Bool] {
         var out = [Bool](repeating: false, count: max(0, width * height))
@@ -35,6 +47,7 @@ struct WalkableGrid: Codable, Equatable, Sendable {
         let width: Int
         let height: Int
         private let open: [Bool]
+        private let ground: [Float]?
 
         init(grid: WalkableGrid) {
             originX = grid.origin.count == 2 ? grid.origin[0] : 0
@@ -43,6 +56,13 @@ struct WalkableGrid: Codable, Equatable, Sendable {
             width = grid.width
             height = grid.height
             open = grid.cells
+            ground = grid.groundSurface
+        }
+
+        /// World Y of the floor under a point.
+        func groundHeight(x: Float, z: Float) -> Float {
+            guard let g = ground, g.count == 6 else { return 0 }
+            return g[0] + g[1] * x + g[2] * z + g[3] * x * x + g[4] * x * z + g[5] * z * z
         }
 
         var isEmpty: Bool { width <= 0 || height <= 0 || open.isEmpty }

@@ -51,3 +51,6 @@ AlicePhil(VRM) 1.01/
 scenes/*/depth.bin
 scenes/*/qc_*.png
 *.npy
+
+# Locally generated test rooms (regenerate with services/scene/estimate_scene.py)
+scenes/_test/

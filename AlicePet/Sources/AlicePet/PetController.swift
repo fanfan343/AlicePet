@@ -415,7 +415,10 @@ final class PetController: NSObject, MTKViewDelegate {
 
     func applyPictureWorldRootTransform() {
         guard pictureWorldRenderer.isActive, let model else { return }
-        let offset = pictureWorldRenderer.avatarWorldPosition
+        var offset = pictureWorldRenderer.avatarWorldPosition
+        // avatarWorldPosition.y is the *local* elevation (0 when standing, the sit offset when
+        // seated); the floor itself is not the Y=0 plane, so lift her onto the real surface.
+        offset.y += pictureWorldRenderer.groundHeight(atX: offset.x, z: offset.z)
         let yawQ = simd_quatf(angle: pictureWorldRenderer.avatarWorldYaw, axis: SIMD3<Float>(0, 1, 0))
         for (idx, node) in model.nodes.enumerated() where node.parent == nil {
             guard let rest = poseController.restNodeTransforms[idx] else { continue }

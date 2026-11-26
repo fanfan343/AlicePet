@@ -22,7 +22,10 @@ import numpy as np
 import torch
 from PIL import Image
 
-import scene_semantics
+import scene_geometry
+import scene_grid
+import scene_qc
+import scene_seats
 
 
 def fit_floor_plane_ransac(
@@ -157,9 +160,12 @@ def main() -> int:
     parser.add_argument("--out-dir", required=True, help="Output scene directory")
     parser.add_argument("--model", default="Ruicheng/moge-2-vits-normal", help="MoGe-2 HuggingFace model ID")
     parser.add_argument("--name", default="", help="Display name for scene.json")
-    parser.add_argument("--depth-max-dim", type=int, default=768, help="Max dimension for stored depth.bin")
+    parser.add_argument("--depth-max-dim", type=int, default=0,
+                        help="Max dimension for stored depth.bin; 0 keeps MoGe's native "
+                             "resolution. Downsampling is what makes depth-buffer occlusion "
+                             "edges stair-step against sharp illustration lineart.")
     parser.add_argument("--device", default="auto", choices=("auto", "mps", "cpu"))
-    parser.add_argument("--grid-cell", type=float, default=scene_semantics.CELL_M,
+    parser.add_argument("--grid-cell", type=float, default=scene_geometry.CELL_M,
                         help="Walkable grid cell size in metres (default 0.06)")
     parser.add_argument("--no-auto-anchors", action="store_true",
                         help="Skip automatic seat-anchor detection (depth + grid only)")
@@ -244,10 +250,13 @@ def main() -> int:
     depth_clean = np.where(valid, np.clip(depth_raw, 0.1, 48.0), 48.0).astype(np.float32)
 
     # Resize depth to compact depth_max_dim preserving aspect ratio
-    scale = min(1.0, args.depth_max_dim / float(max(img_w, img_h)))
+    max_dim = args.depth_max_dim if args.depth_max_dim > 0 else max(img_w, img_h)
+    scale = min(1.0, max_dim / float(max(img_w, img_h)))
     dep_w = max(64, int(round(img_w * scale)))
     dep_h = max(64, int(round(img_h * scale)))
-    depth_resized = cv2.resize(depth_clean, (dep_w, dep_h), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+    depth_resized = (depth_clean if (dep_w, dep_h) == (img_w, img_h)
+                     else cv2.resize(depth_clean, (dep_w, dep_h),
+                                     interpolation=cv2.INTER_NEAREST)).astype(np.float32)
 
     depth_bin = out_dir / "depth.bin"
     depth_resized.tofile(depth_bin)
@@ -260,10 +269,11 @@ def main() -> int:
 
     # --- Route B: automatic walkable grid + seat anchors -------------------------------
     t2 = time.monotonic()
-    points_world, normals_world = scene_semantics.camera_to_world(
+    points_world, normals_world = scene_geometry.camera_to_world(
         points_cam, normals_cam, spawn_cam, R_c2w)
-    grid = scene_semantics.build_walkable_grid(points_world, valid, cell=args.grid_cell)
-    grid_json = grid.to_json()
+    cloud = scene_geometry.RoomCloud.build(points_world, normals_world, valid)
+    grid = scene_grid.build_walkable_grid(cloud, cell=args.grid_cell)
+    grid_json = grid.to_json(ground=cloud.ground)
 
     if args.dump_cloud:
         np.save(out_dir / "points_world.npy", points_world.astype(np.float32))
@@ -273,13 +283,17 @@ def main() -> int:
     walk_min, walk_max = grid_json["boundsMin"], grid_json["boundsMax"]
 
     anchors: list[dict] = []
-    seat_candidates: list[scene_semantics.SeatCandidate] = []
+    seat_candidates: list[scene_seats.SeatCandidate] = []
     seat_source = "off"
     if not args.no_auto_anchors and args.seats != "off":
-        seat_candidates, seat_source = scene_semantics.detect_seats(
-            img_path, points_world, normals_world, valid, mode=args.seats, cell=args.grid_cell)
-        anchors = scene_semantics.solve_seat_anchors(
-            seat_candidates, grid, points_world, valid)
+        t_detect = time.monotonic()
+        seat_candidates, seat_source = scene_seats.detect_seats(
+            img_path, cloud, mode=args.seats, cell=args.grid_cell)
+        t_anchors = time.monotonic()
+        anchors = scene_seats.solve_seat_anchors(seat_candidates, grid, cloud)
+        print(f"[Scene] Timing: ground+grid+index={(t_detect - t2)*1000:.0f}ms "
+              f"seats={(t_anchors - t_detect)*1000:.0f}ms anchors={(time.monotonic() - t_anchors)*1000:.0f}ms",
+              flush=True)
     semantics_ms = (time.monotonic() - t2) * 1000.0
 
     scene_cfg = {
@@ -293,7 +307,7 @@ def main() -> int:
         "cameraPosition": [round(float(x), 4) for x in cam_pos],
         "cameraTarget": [round(float(x), 4) for x in cam_target],
         "cameraUp": [round(float(x), 4) for x in cam_up],
-        "avatarSpawnPosition": [0.0, 0.0, 0.0],
+        "avatarSpawnPosition": [round(grid.spawn[0], 3), 0.0, round(grid.spawn[1], 3)],
         "avatarSpawnYawRad": 0.0,
         "avatarScale": 1.0,
         "walkBoundsMin": walk_min,
@@ -326,9 +340,11 @@ def main() -> int:
 
     if not args.no_qc:
         try:
-            scene_semantics.render_qc_overlay(grid, anchors, out_dir / "qc_topdown.png")
-            scene_semantics.render_image_overlay(
+            scene_qc.render_qc_overlay(grid, anchors, out_dir / "qc_topdown.png")
+            scene_qc.render_image_overlay(
                 scene_cfg, bg_out, seat_candidates, anchors, out_dir / "qc_candidates.png")
+            scene_qc.render_grid_on_image(
+                scene_cfg, bg_out, grid, out_dir / "qc_grid_on_image.png")
         except Exception as exc:  # QC art must never break a scene build
             print(f"[Scene] QC overlay skipped ({exc})", flush=True)
 
@@ -352,10 +368,11 @@ def main() -> int:
     for a in anchors:
         print(
             f"[Scene]   anchor {a['id']} '{a['label']}' seat={a['seatHeight']:.2f}m "
+            f"(+{a['_rel']:.2f}m above local floor) "
             f"facing={math.degrees(a['facingYawRad']):+.0f}° "
             f"target=({a['_x']:+.2f},{a['_z']:+.2f}) "
             f"approach=({a['approachPosition'][0]:+.2f},{a['approachPosition'][2]:+.2f}) "
-            f"score={a['_score']:.2f} (front={a['_front']:.2f} back={a['_back']:.2f} area={a['_area']:.2f}m²)",
+            f"score={a['_score']:.2f}",
             flush=True,
         )
     if args.no_auto_anchors:
