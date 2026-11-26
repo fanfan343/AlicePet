@@ -46,6 +46,7 @@ struct PictureWorldSceneConfig: Codable {
     let farClip: Float?
     let lightingPreset: String?
     let anchors: [SceneAnchor]?
+    let walkableGrid: WalkableGrid?
 
     var camPos: SIMD3<Float> { vec3(cameraPosition, fallback: SIMD3<Float>(0, 1.35, 2.8)) }
     var camTarget: SIMD3<Float> { vec3(cameraTarget, fallback: SIMD3<Float>(0, 1.0, 0)) }
@@ -101,6 +102,8 @@ final class PictureWorldRenderer {
 
     private(set) var config: PictureWorldSceneConfig?
     private(set) var sceneFolderURL: URL?
+    /// Parsed walkable floor grid for the active scene (nil for hand-authored scenes without one).
+    private(set) var roomGrid: WalkableGrid.ParsedGrid?
     private var bgTexture: MTLTexture?
     private var depthTexture: MTLTexture?
     /// CPU-side copy of MoGe-2 metric depth (`depthWidth * depthHeight`, ~1.5 MB) for O(1) LLM occlusion queries.
@@ -188,6 +191,7 @@ final class PictureWorldRenderer {
 
         self.config = cfg
         self.sceneFolderURL = folderURL
+        self.roomGrid = cfg.walkableGrid.map { WalkableGrid.ParsedGrid(grid: $0) }
         self.bgTexture = bgTex
         self.depthTexture = depthTex
         self.depthMeters = depthCPU
@@ -208,6 +212,7 @@ final class PictureWorldRenderer {
     func unloadScene() {
         config = nil
         sceneFolderURL = nil
+        roomGrid = nil
         bgTexture = nil
         depthTexture = nil
         depthMeters.removeAll(keepingCapacity: false)
@@ -505,6 +510,22 @@ final class PictureWorldRenderer {
            let maxB = cfg.walkBoundsMax, maxB.count == 2 {
             p.x = min(max(p.x, minB[0]), maxB[0])
             p.z = min(max(p.z, minB[1]), maxB[1])
+        }
+
+        // 3. Walkable floor grid: the auto scene analyser's furniture footprints. The box
+        // bounds above only describe the room outline; this is what keeps Alice out of the
+        // coffee table, the fireplace hearth and the sofa she is walking around.
+        if let grid = roomGrid, !grid.isEmpty, !grid.isWalkable(x: p.x, z: p.z) {
+            if let snapped = grid.nearestWalkable(x: p.x, z: p.z, maxRadius: 12) {
+                let push = SIMD2<Float>(snapped.x - p.x, snapped.y - p.z)
+                if simd_length(push) > 1e-3 {
+                    inward += simd_normalize(push) * 0.9
+                }
+                p.x = snapped.x
+                p.z = snapped.y
+                contacts.insert("furniture")
+                isNear = true
+            }
         }
 
         // Blend room-center vector so inward steering always points cleanly back into open floor

@@ -34,8 +34,12 @@ final class SceneActionController {
         return nil
     }
 
+    /// Remaining waypoints of the A* route to the current anchor (empty = walk straight at it).
+    private var walkPath: [SIMD2<Float>] = []
+
     var activeWalkGoalXZ: SIMD2<Float>? {
         if case .walkingToAnchor(let a) = phase {
+            if let next = walkPath.first { return next }
             let p = a.approachPos
             return SIMD2<Float>(p.x, p.z)
         }
@@ -57,10 +61,25 @@ final class SceneActionController {
 
         walkElapsed = 0
         stallElapsed = 0
-        lastWalkPosXZ = SIMD2<Float>(
+        let startXZ = SIMD2<Float>(
             controller.pictureWorldRenderer.avatarWorldPosition.x,
             controller.pictureWorldRenderer.avatarWorldPosition.z
         )
+        lastWalkPosXZ = startXZ
+
+        // Route around furniture instead of walking through it. Falls back to a straight
+        // line when the scene has no walkable grid (hand-authored scenes).
+        let goalXZ = SIMD2<Float>(anchor.approachPos.x, anchor.approachPos.z)
+        if let grid = controller.pictureWorldRenderer.roomGrid,
+           let path = grid.findPath(from: startXZ, to: goalXZ) {
+            walkPath = path
+            AppLogger.shared.info(
+                "SceneAction",
+                "A* route to '\(anchor.label)': \(path.count) leg(s) \(path.map { "(\(String(format: "%.2f", $0.x)),\(String(format: "%.2f", $0.y)))" }.joined(separator: " -> "))"
+            )
+        } else {
+            walkPath = []
+        }
 
         // Start or redirect ARDY with a gentle forward-walking prompt
         let walkPrompt = "a petite gentle young girl walks slowly and gracefully forward with small light steps"
@@ -97,6 +116,7 @@ final class SceneActionController {
         walkElapsed = 0
         stallElapsed = 0
         lastWalkPosXZ = nil
+        walkPath.removeAll()
         onPhaseChanged?()
     }
 
@@ -105,6 +125,7 @@ final class SceneActionController {
         walkElapsed = 0
         stallElapsed = 0
         lastWalkPosXZ = nil
+        walkPath.removeAll()
     }
 
     /// Evaluates one frame of the active behavior chain inside `PetController.draw(in:)`.
@@ -127,7 +148,12 @@ final class SceneActionController {
             walkElapsed += clampedDt
             let curPos = controller.pictureWorldRenderer.avatarWorldPosition
             let curXZ = SIMD2<Float>(curPos.x, curPos.z)
-            let goalXZ = SIMD2<Float>(anchor.approachPos.x, anchor.approachPos.z)
+            let finalGoalXZ = SIMD2<Float>(anchor.approachPos.x, anchor.approachPos.z)
+            // Advance along the A* route: a waypoint counts as reached once she is on top of it.
+            while let next = walkPath.first, simd_length(next - curXZ) <= 0.20 {
+                walkPath.removeFirst()
+            }
+            let goalXZ = walkPath.first ?? finalGoalXZ
             let dist = simd_length(goalXZ - curXZ)
 
             // Fallback gentle locomotion assist only if ARDY takes >1.5s to start moving forward
@@ -155,8 +181,8 @@ final class SceneActionController {
             }
 
             let updatedPos = controller.pictureWorldRenderer.avatarWorldPosition
-            let updatedDist = simd_length(goalXZ - SIMD2<Float>(updatedPos.x, updatedPos.z))
-            if updatedDist <= 0.18 || walkElapsed > 14.0 {
+            let updatedDist = simd_length(finalGoalXZ - SIMD2<Float>(updatedPos.x, updatedPos.z))
+            if (walkPath.isEmpty && updatedDist <= 0.18) || walkElapsed > 20.0 {
                 // Arrived right in front of the sofa -> transition to aligning & turning outward to sit
                 phase = .aligningToAnchor(
                     anchor: anchor,

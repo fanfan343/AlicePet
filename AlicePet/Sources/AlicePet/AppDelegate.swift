@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var ardyLabPanel: ArdyLabPanel?
 
     private var isClickThrough: Bool = false
+    /// True while the scene service is analysing an image, so the menu can say so.
+    private var sceneBuildInProgress: Bool = false
     private var isAlwaysOnTop: Bool = true
     private let lightingPresetKey = "mtoonLightingPreset"
     private let outlineStyleKey = "mtoonOutlineStyle"
@@ -596,6 +598,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         sceneMenu.addItem(.separator())
+        let createSceneTitle = sceneBuildInProgress
+            ? "正在分析图片，生成交互房间…"
+            : "从任意房间图片新建交互房间… (自动识座位/地面)"
+        let createSceneItem = NSMenuItem(title: createSceneTitle, action: #selector(createPictureWorldFromImage), keyEquivalent: "")
+        createSceneItem.target = self
+        createSceneItem.isEnabled = !sceneBuildInProgress
+        sceneMenu.addItem(createSceneItem)
+
         let openSceneItem = NSMenuItem(title: "打开自定义画中世界目录…", action: #selector(pickPictureWorldScene), keyEquivalent: "")
         openSceneItem.target = self
         sceneMenu.addItem(openSceneItem)
@@ -1123,6 +1133,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             AppLogger.shared.error("PictureWorld", "Failed to load scene: \(error)")
         }
+    }
+
+    /// Builds a brand-new interactive room from one photo/illustration: MoGe-2 metric depth +
+    /// auto walkable floor grid + auto seat anchors, by calling the scene service, then loads it.
+    @objc private func createPictureWorldFromImage() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "选择一张房间照片或插画"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let projectRoot = URL(fileURLWithPath: "/Users/funnyliu/Downloads/VRM项目")
+        let python = projectRoot.appendingPathComponent("services/scene/.venv/bin/python")
+        let script = projectRoot.appendingPathComponent("services/scene/estimate_scene.py")
+        let scenesRoot = projectRoot.appendingPathComponent("scenes", isDirectory: true)
+
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: python.path), fm.fileExists(atPath: script.path) else {
+            presentSceneBuildFailure("找不到场景分析服务：\(python.path)")
+            return
+        }
+
+        // Unique folder per image so re-importing never overwrites an existing room.
+        let base = url.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: " ", with: "_")
+        var slug = base
+        var suffix = 2
+        while fm.fileExists(atPath: scenesRoot.appendingPathComponent(slug).path) {
+            slug = "\(base)_\(suffix)"
+            suffix += 1
+        }
+        let outDir = scenesRoot.appendingPathComponent(slug, isDirectory: true)
+
+        sceneBuildInProgress = true
+        AppLogger.shared.info("PictureWorld", "Building interactive room from '\(url.lastPathComponent)' -> scenes/\(slug)")
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = python
+            process.arguments = [
+                script.path,
+                "--image", url.path,
+                "--out-dir", outDir.path,
+                "--name", url.deletingPathExtension().lastPathComponent,
+            ]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            var output = ""
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                output = String(data: data, encoding: .utf8) ?? ""
+            } catch {
+                DispatchQueue.main.async {
+                    self.sceneBuildInProgress = false
+                    self.presentSceneBuildFailure("无法启动场景分析：\(error.localizedDescription)")
+                }
+                return
+            }
+
+            let status = process.terminationStatus
+            DispatchQueue.main.async {
+                self.sceneBuildInProgress = false
+                if status == 0 {
+                    let summary = output
+                        .split(separator: "\n")
+                        .filter { $0.contains("[Scene]") && !$0.contains("Loading") }
+                        .suffix(4)
+                        .joined(separator: "\n")
+                    AppLogger.shared.info("PictureWorld", "Room built:\n\(summary)")
+                    do {
+                        try self.controller.loadPictureWorld(from: outDir)
+                        self.syncWindowForPictureWorld()
+                    } catch {
+                        self.presentSceneBuildFailure("房间已生成，但加载失败：\(error)")
+                    }
+                } else {
+                    let tail = output.split(separator: "\n").suffix(6).joined(separator: "\n")
+                    self.presentSceneBuildFailure("场景分析失败（退出码 \(status)）：\n\(tail)")
+                }
+            }
+        }
+    }
+
+    private func presentSceneBuildFailure(_ message: String) {
+        AppLogger.shared.error("PictureWorld", message)
+        let alert = NSAlert()
+        alert.messageText = "无法生成交互房间"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     @objc private func pickPictureWorldScene() {

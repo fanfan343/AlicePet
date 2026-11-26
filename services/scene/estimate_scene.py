@@ -22,6 +22,8 @@ import numpy as np
 import torch
 from PIL import Image
 
+import scene_semantics
+
 
 def fit_floor_plane_ransac(
     points_cam: np.ndarray,
@@ -120,8 +122,8 @@ def pick_spawn_point(
 def build_world_camera(
     normal_cam: np.ndarray,
     spawn_cam: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Builds exact world-space (camPos, camTarget, camUp) where world origin (0,0,0) = spawn on floor Y=0."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Builds exact world-space (camPos, camTarget, camUp, R_c2w) where world origin (0,0,0) = spawn on floor Y=0."""
     up_cam = normal_cam / float(np.linalg.norm(normal_cam))
     cam_fwd_in_cam = np.array([0.0, 0.0, -1.0], dtype=np.float64)
     # Project camera forward onto floor plane so world -Z is horizontal forward into the room
@@ -146,7 +148,7 @@ def build_world_camera(
     cam_up_world = R_c2w @ np.array([0.0, 1.0, 0.0], dtype=np.float64)
     cam_target_world = cam_pos_world + cam_fwd_world * 2.5
 
-    return cam_pos_world, cam_target_world, cam_up_world
+    return cam_pos_world, cam_target_world, cam_up_world, R_c2w
 
 
 def main() -> int:
@@ -157,6 +159,18 @@ def main() -> int:
     parser.add_argument("--name", default="", help="Display name for scene.json")
     parser.add_argument("--depth-max-dim", type=int, default=768, help="Max dimension for stored depth.bin")
     parser.add_argument("--device", default="auto", choices=("auto", "mps", "cpu"))
+    parser.add_argument("--grid-cell", type=float, default=scene_semantics.CELL_M,
+                        help="Walkable grid cell size in metres (default 0.06)")
+    parser.add_argument("--no-auto-anchors", action="store_true",
+                        help="Skip automatic seat-anchor detection (depth + grid only)")
+    parser.add_argument("--seats", default="auto", choices=("auto", "vision", "geometry", "off"),
+                        help="Seat detection: 'auto' = COCO detector with geometric fallback "
+                             "(default), 'vision' = detector only, 'geometry' = no model at all")
+    parser.add_argument("--keep-anchors", action="store_true",
+                        help="Keep anchors already present in an existing scene.json")
+    parser.add_argument("--no-qc", action="store_true", help="Skip the top-down QC overlay render")
+    parser.add_argument("--dump-cloud", action="store_true",
+                        help="Also save points_world/normals_world/valid as .npy for tuning")
     args = parser.parse_args()
 
     img_path = Path(args.image).expanduser().resolve()
@@ -224,7 +238,7 @@ def main() -> int:
     valid = mask & np.isfinite(depth_raw) & (depth_raw > 0.1) & (depth_raw < 49.0)
     floor_n, floor_d, floor_mask = fit_floor_plane_ransac(points_cam, normals_cam, valid)
     spawn_cam = pick_spawn_point(points_cam, floor_mask, floor_n, floor_d)
-    cam_pos, cam_target, cam_up = build_world_camera(floor_n, spawn_cam)
+    cam_pos, cam_target, cam_up, R_c2w = build_world_camera(floor_n, spawn_cam)
 
     # Fill invalid/sky depth pixels cleanly with far depth (48m)
     depth_clean = np.where(valid, np.clip(depth_raw, 0.1, 48.0), 48.0).astype(np.float32)
@@ -244,6 +258,30 @@ def main() -> int:
     d_color = cv2.applyColorMap(d_norm, cv2.COLORMAP_INFERNO)
     cv2.imwrite(str(out_dir / "depth_vis.png"), d_color)
 
+    # --- Route B: automatic walkable grid + seat anchors -------------------------------
+    t2 = time.monotonic()
+    points_world, normals_world = scene_semantics.camera_to_world(
+        points_cam, normals_cam, spawn_cam, R_c2w)
+    grid = scene_semantics.build_walkable_grid(points_world, valid, cell=args.grid_cell)
+    grid_json = grid.to_json()
+
+    if args.dump_cloud:
+        np.save(out_dir / "points_world.npy", points_world.astype(np.float32))
+        if normals_world is not None:
+            np.save(out_dir / "normals_world.npy", normals_world.astype(np.float32))
+        np.save(out_dir / "valid.npy", valid)
+    walk_min, walk_max = grid_json["boundsMin"], grid_json["boundsMax"]
+
+    anchors: list[dict] = []
+    seat_candidates: list[scene_semantics.SeatCandidate] = []
+    seat_source = "off"
+    if not args.no_auto_anchors and args.seats != "off":
+        seat_candidates, seat_source = scene_semantics.detect_seats(
+            img_path, points_world, normals_world, valid, mode=args.seats, cell=args.grid_cell)
+        anchors = scene_semantics.solve_seat_anchors(
+            seat_candidates, grid, points_world, valid)
+    semantics_ms = (time.monotonic() - t2) * 1000.0
+
     scene_cfg = {
         "version": 1,
         "name": args.name or img_path.stem,
@@ -258,22 +296,70 @@ def main() -> int:
         "avatarSpawnPosition": [0.0, 0.0, 0.0],
         "avatarSpawnYawRad": 0.0,
         "avatarScale": 1.0,
-        "walkBoundsMin": [-1.2, -1.2],
-        "walkBoundsMax": [1.2, 1.2],
+        "walkBoundsMin": walk_min,
+        "walkBoundsMax": walk_max,
         "nearClip": 0.05,
         "farClip": 50.0,
         "lightingPreset": "warm_lamp",
+        "walkableGrid": grid_json,
     }
-    (out_dir / "scene.json").write_text(json.dumps(scene_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    existing_anchors = None
+    scene_json_path = out_dir / "scene.json"
+    if scene_json_path.exists():
+        try:
+            existing_anchors = json.loads(scene_json_path.read_text(encoding="utf-8")).get("anchors")
+        except (json.JSONDecodeError, OSError):
+            existing_anchors = None
+
+    use_auto = anchors and not (args.keep_anchors and existing_anchors)
+    if args.keep_anchors and existing_anchors:
+        scene_cfg["anchors"] = existing_anchors
+    elif use_auto:
+        scene_cfg["anchors"] = [
+            {k: v for k, v in a.items() if not k.startswith("_")} for a in anchors
+        ]
+    elif existing_anchors:
+        scene_cfg["anchors"] = existing_anchors
+
+    scene_json_path.write_text(json.dumps(scene_cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if not args.no_qc:
+        try:
+            scene_semantics.render_qc_overlay(grid, anchors, out_dir / "qc_topdown.png")
+            scene_semantics.render_image_overlay(
+                scene_cfg, bg_out, seat_candidates, anchors, out_dir / "qc_candidates.png")
+        except Exception as exc:  # QC art must never break a scene build
+            print(f"[Scene] QC overlay skipped ({exc})", flush=True)
 
     cam_height = float(cam_pos[1])
     spawn_dist = float(np.linalg.norm(cam_pos))
+    walkable_cells = int(grid_json["walkableCount"])
     print(
-        f"[Scene] OK! load={load_ms:.0f}ms infer={infer_ms:.0f}ms ({device}) "
+        f"[Scene] OK! load={load_ms:.0f}ms infer={infer_ms:.0f}ms semantics={semantics_ms:.0f}ms ({device}) "
         f"fovY={fov_y_deg:.1f}° camHeight={cam_height:.2f}m spawnDist={spawn_dist:.2f}m "
         f"floorInliers={int(floor_mask.sum())} -> {out_dir}",
         flush=True,
     )
+    print(
+        f"[Scene] Walkable: {walkable_cells} cells @ {args.grid_cell:.2f}m "
+        f"({walkable_cells * args.grid_cell * args.grid_cell:.2f} m^2), "
+        f"bounds X[{walk_min[0]:+.2f},{walk_max[0]:+.2f}] Z[{walk_min[1]:+.2f},{walk_max[1]:+.2f}]",
+        flush=True,
+    )
+    if seat_candidates:
+        print(f"[Scene] Seat candidates ({seat_source}): {len(seat_candidates)}", flush=True)
+    for a in anchors:
+        print(
+            f"[Scene]   anchor {a['id']} '{a['label']}' seat={a['seatHeight']:.2f}m "
+            f"facing={math.degrees(a['facingYawRad']):+.0f}° "
+            f"target=({a['_x']:+.2f},{a['_z']:+.2f}) "
+            f"approach=({a['approachPosition'][0]:+.2f},{a['approachPosition'][2]:+.2f}) "
+            f"score={a['_score']:.2f} (front={a['_front']:.2f} back={a['_back']:.2f} area={a['_area']:.2f}m²)",
+            flush=True,
+        )
+    if args.no_auto_anchors:
+        print("[Scene] Auto anchors disabled (--no-auto-anchors)", flush=True)
     return 0
 
 
