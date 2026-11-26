@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 GROUND_FIT_BAND = 0.80    # points this close to the plane seed the ground-surface fit
@@ -91,3 +92,81 @@ def _fit_ground_surface(pts: np.ndarray, normals: np.ndarray,
         plane, *_ = np.linalg.lstsq(A, yy, rcond=None)
         coef = np.array([plane[0], plane[1], plane[2], 0.0, 0.0, 0.0])
     return coef
+
+
+def refine_depth_edges(
+    depth: np.ndarray,
+    rgb: np.ndarray,
+    grad_rel_thresh: float = 0.04,
+    radius: int = 8,
+    band_dilate: int = 4,
+) -> np.ndarray:
+    """Snaps blurry monocular depth discontinuities onto crisp RGB object silhouettes.
+
+    Smooth interior surfaces stay bit-exact untouched. On narrow depth-jump bands, each pixel
+    adopts the depth of the clean neighbor with the closest Lab color (removing flying-pixel
+    halos around leaves, chairs, and props), while high-gradient outline pixels whose color
+    matches neither side prefer the nearer occluder.
+    """
+    h, w = depth.shape
+    if rgb.shape[:2] != (h, w):
+        rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_AREA)
+
+    k3 = np.ones((3, 3), np.uint8)
+    d_min = cv2.erode(depth, k3)
+    rel_jump = (cv2.dilate(depth, k3) - d_min) / np.maximum(d_min, 0.1)
+    edge_mask = rel_jump > grad_rel_thresh
+
+    kd = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band_dilate + 1, 2 * band_dilate + 1))
+    uncertain = cv2.dilate(edge_mask.astype(np.uint8), kd) > 0
+    clean = ~uncertain
+    n_unc = int(uncertain.sum())
+    if n_unc == 0:
+        return depth
+
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    is_outline = np.hypot(gx, gy) > 80.0
+
+    uy, ux = np.nonzero(uncertain)
+    target_lab = lab[uy, ux]
+    target_outline = is_outline[uy, ux]
+
+    best_cost = np.full(n_unc, np.inf, dtype=np.float32)
+    best_depth = depth[uy, ux].copy()
+    near_depth = np.full(n_unc, np.inf, dtype=np.float32)
+
+    offsets = []
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            r2 = dx * dx + dy * dy
+            if r2 == 0 or r2 > radius * radius:
+                continue
+            if r2 > 16 and ((dx & 1) != 0 or (dy & 1) != 0):
+                continue
+            offsets.append((dy, dx, float(r2)))
+
+    for dy, dx, r2 in offsets:
+        ny = np.clip(uy + dy, 0, h - 1)
+        nx = np.clip(ux + dx, 0, w - 1)
+        valid_n = clean[ny, nx]
+        if not valid_n.any():
+            continue
+        nd = depth[ny, nx]
+        diff = lab[ny, nx] - target_lab
+        cost = diff[:, 0] * diff[:, 0] + diff[:, 1] * diff[:, 1] + diff[:, 2] * diff[:, 2] + 0.25 * r2
+        better = valid_n & (cost < best_cost)
+        best_cost[better] = cost[better]
+        best_depth[better] = nd[better]
+        if r2 <= 9.0:
+            near_better = valid_n & (nd < near_depth)
+            near_depth[near_better] = nd[near_better]
+
+    outline_fix = target_outline & (best_cost > 400.0) & np.isfinite(near_depth)
+    best_depth[outline_fix] = near_depth[outline_fix]
+
+    out = depth.copy()
+    out[uy, ux] = best_depth
+    return out

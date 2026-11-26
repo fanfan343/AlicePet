@@ -217,6 +217,7 @@ def main() -> int:
     cam_pos, cam_target, cam_up, R_c2w = build_world_camera(floor_n, spawn_cam)
 
     depth_clean = np.where(valid, np.clip(depth_raw, 0.1, 48.0), 48.0).astype(np.float32)
+    depth_clean = scene_geometry.refine_depth_edges(depth_clean, rgb)
 
     max_dim = args.depth_max_dim if args.depth_max_dim > 0 else max(img_w, img_h)
     scale = min(1.0, max_dim / float(max(img_w, img_h)))
